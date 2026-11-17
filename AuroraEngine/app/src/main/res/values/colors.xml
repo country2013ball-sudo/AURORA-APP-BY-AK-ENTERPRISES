@@ -1,0 +1,28 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- Core Dark Obsidian Palette -->
+    <color name="aurora_bg_deep">#FF090A0F</color>
+    <color name="aurora_card_dark">#FF12141C</color>
+    <color name="aurora_card_elevated">#FF1A1D28</color>
+    <color name="aurora_border_subtle">#FF2A2E3D</color>
+
+    <!-- Brand Identity: AK Enterprises Metallic Gold & Aurora Engine Deep Crimson -->
+    <color name="ak_gold_primary">#FFD4AF37</color>
+    <color name="ak_gold_light">#FFFFDF73</color>
+    <color name="aurora_crimson_primary">#FFB71C1C</color>
+    <color name="aurora_crimson_bright">#FFFF1744</color>
+    <color name="aurora_crimson_dark">#FF4A0A0A</color>
+
+    <!-- Three Performance Modes -->
+    <color name="mode_battery_green">#FF00C853</color>
+    <color name="mode_battery_dark">#FF0D3B1E</color>
+    <color name="mode_balanced_gold">#FFFFC107</color>
+    <color name="mode_balanced_dark">#FF3E2F05</color>
+    <color name="mode_performance_red">#FFD50000</color>
+    <color name="mode_performance_dark">#FF420808</color>
+
+    <!-- Text Hierarchy -->
+    <color name="text_primary">#FFF5F7FA</color>
+    <color name="text_secondary">#FFA0AAB8</color>
+    <color name="text_muted">#FF6C7585</color>
+</resources>

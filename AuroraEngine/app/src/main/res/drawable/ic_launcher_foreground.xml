@@ -1,0 +1,33 @@
+<?xml version="1.0" encoding="utf-8"?>
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+    <!-- Outer Hexagonal Performance Engine Shield in Metallic Gold -->
+    <path
+        android:fillColor="#14161F"
+        android:strokeColor="#D4AF37"
+        android:strokeWidth="2.2"
+        android:pathData="M54,22 L81,37.5 L81,68.5 L54,84 L27,68.5 L27,37.5 Z" />
+    <!-- Aurora Ribbon Left Wing (Deep Crimson) -->
+    <path
+        android:fillColor="#B71C1C"
+        android:pathData="M33,64 L54,29 L50,51 L39,66 Z" />
+    <!-- Aurora Ribbon Right Wing (Bright Crimson) -->
+    <path
+        android:fillColor="#E53935"
+        android:pathData="M75,64 L54,29 L58,51 L69,66 Z" />
+    <!-- Central Engine Core Diamond (Metallic Gold) -->
+    <path
+        android:fillColor="#FFD54F"
+        android:pathData="M54,43 L62,55 L54,67 L46,55 Z" />
+    <!-- Inner Precision Core (Obsidian Cutout) -->
+    <path
+        android:fillColor="#090A0F"
+        android:pathData="M54,49 L58,55 L54,61 L50,55 Z" />
+    <!-- Top Gold Crown Accent for AK Enterprises -->
+    <path
+        android:fillColor="#D4AF37"
+        android:pathData="M48,26 L54,22 L60,26 L54,28 Z" />
+</vector>
