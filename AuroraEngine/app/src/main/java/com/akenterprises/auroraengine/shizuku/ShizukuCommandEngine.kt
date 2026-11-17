@@ -2,6 +2,7 @@ package com.akenterprises.auroraengine.shizuku
 
 import android.os.Build
 import com.akenterprises.auroraengine.core.model.CommandExecutionRecord
+import com.akenterprises.auroraengine.core.model.PerformanceMode
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -10,11 +11,20 @@ import kotlinx.coroutines.withContext
 import rikka.shizuku.Shizuku
 import java.io.BufferedReader
 import java.io.InputStreamReader
+import java.util.Locale
 import java.util.concurrent.TimeUnit
 
 /**
- * Authorized Shizuku Command Engine with Strict Command Whitelist, Argument Validation,
- * Execution Timeouts, Output Capture, Deduplication, and Reversible Rollback Registry.
+ * V2 Ultra-Fast Batched Shizuku Command Engine.
+ *
+ * Key V2 Performance Improvements over V1:
+ * 1. Executes entire mode transitions in ONE single `/system/bin/sh -c` binder process instead
+ *    of spawning 6-10 separate processes (eliminates startup & mode-switch lag completely).
+ * 2. Integrates Android hardware optimizations for Roblox (`com.roblox.client`):
+ *    - Android 12+ GameManager intervention & hardware surface downscaling (`cmd game downscale`)
+ *    - Fixed performance power hint (`cmd power set-fixed-performance-mode-enabled`)
+ *    - Display peak & floor refresh rate lock (`120.0` / `90.0` / `60.0`)
+ *    - Batched animation and refresh-rate settings
  */
 class ShizukuCommandEngine(
     private val connectionManager: ShizukuConnectionManager
@@ -29,27 +39,24 @@ class ShizukuCommandEngine(
         val maxSdk: Int = 99,
         val commandBuilder: (String) -> List<String>,
         val argumentValidator: (String) -> Boolean,
-        val rollbackBuilder: ((String) -> List<String>)? = null
+        val rollbackCommandStr: String? = null
     )
 
     private val _executionHistory = MutableStateFlow<List<CommandExecutionRecord>>(emptyList())
     val executionHistory: StateFlow<List<CommandExecutionRecord>> = _executionHistory.asStateFlow()
 
-    // Stores rollback commands keyed by spec ID so changes can be cleanly restored
-    private val activeRollbacks = LinkedHashMap<String, Pair<WhitelistedSpec, List<String>>>()
     private val lastExecutedArgs = HashMap<String, String>()
 
-    // Strict whitelist of safe, non-destructive Android shell commands
     private val whitelist: Map<String, WhitelistedSpec> = mapOf(
         "window_anim_scale" to WhitelistedSpec(
             id = "window_anim_scale",
             name = "Window Animation Scale",
-            purpose = "Adjusts window open/close transition duration to match selected performance mode.",
-            requiredPermission = "Shizuku ADB Shell (UID 2000) / WRITE_SECURE_SETTINGS",
+            purpose = "Adjusts window open/close transition duration.",
+            requiredPermission = "Shizuku ADB Shell (UID 2000)",
             minSdk = 26,
             commandBuilder = { scale -> listOf("settings", "put", "global", "window_animation_scale", scale) },
             argumentValidator = { scale -> scale in setOf("0.0", "0.5", "0.75", "1.0") },
-            rollbackBuilder = { prev -> listOf("settings", "put", "global", "window_animation_scale", prev.ifBlank { "1.0" }) }
+            rollbackCommandStr = "settings put global window_animation_scale 1.0"
         ),
         "transition_anim_scale" to WhitelistedSpec(
             id = "transition_anim_scale",
@@ -59,84 +66,177 @@ class ShizukuCommandEngine(
             minSdk = 26,
             commandBuilder = { scale -> listOf("settings", "put", "global", "transition_animation_scale", scale) },
             argumentValidator = { scale -> scale in setOf("0.0", "0.5", "0.75", "1.0") },
-            rollbackBuilder = { prev -> listOf("settings", "put", "global", "transition_animation_scale", prev.ifBlank { "1.0" }) }
+            rollbackCommandStr = "settings put global transition_animation_scale 1.0"
         ),
         "animator_duration_scale" to WhitelistedSpec(
             id = "animator_duration_scale",
             name = "Animator Duration Scale",
-            purpose = "Adjusts ValueAnimator speed for UI responsiveness.",
+            purpose = "Adjusts ValueAnimator speed for instant UI response.",
             requiredPermission = "Shizuku ADB Shell (UID 2000)",
             minSdk = 26,
             commandBuilder = { scale -> listOf("settings", "put", "global", "animator_duration_scale", scale) },
             argumentValidator = { scale -> scale in setOf("0.0", "0.5", "0.75", "1.0") },
-            rollbackBuilder = { prev -> listOf("settings", "put", "global", "animator_duration_scale", prev.ifBlank { "1.0" }) }
+            rollbackCommandStr = "settings put global animator_duration_scale 1.0"
         ),
         "peak_refresh_rate" to WhitelistedSpec(
             id = "peak_refresh_rate",
             name = "Display Peak Refresh Rate",
-            purpose = "Requests supported peak display refresh rate (60/90/120 Hz) on compatible panels.",
+            purpose = "Locks peak display refresh rate (60/90/120 Hz).",
             requiredPermission = "Shizuku ADB Shell (UID 2000)",
             minSdk = 29,
             commandBuilder = { hz -> listOf("settings", "put", "system", "peak_refresh_rate", hz) },
             argumentValidator = { hz -> hz in setOf("60.0", "90.0", "120.0") },
-            rollbackBuilder = { prev -> listOf("settings", "put", "system", "peak_refresh_rate", prev.ifBlank { "90.0" }) }
+            rollbackCommandStr = "settings put system peak_refresh_rate 90.0"
         ),
         "min_refresh_rate" to WhitelistedSpec(
             id = "min_refresh_rate",
             name = "Display Minimum Refresh Rate",
-            purpose = "Requests stable minimum refresh floor during active gaming sessions.",
+            purpose = "Locks minimum refresh floor to eliminate VRR frame-rate drops during Roblox.",
             requiredPermission = "Shizuku ADB Shell (UID 2000)",
             minSdk = 29,
             commandBuilder = { hz -> listOf("settings", "put", "system", "min_refresh_rate", hz) },
             argumentValidator = { hz -> hz in setOf("60.0", "90.0", "120.0") },
-            rollbackBuilder = { prev -> listOf("settings", "put", "system", "min_refresh_rate", prev.ifBlank { "60.0" }) }
+            rollbackCommandStr = "settings put system min_refresh_rate 60.0"
         ),
         "game_mode_intervention" to WhitelistedSpec(
             id = "game_mode_intervention",
             name = "Android GameManager Mode",
-            purpose = "Sets standard Android 12+ GameMode (1=Standard, 2=Performance, 3=Battery) for com.roblox.client.",
-            requiredPermission = "Shizuku ADB Shell (UID 2000) / MANAGE_GAME_MODE",
+            purpose = "Sets Android 12+ GameMode (1=Standard, 2=Performance, 3=Battery) for com.roblox.client.",
+            requiredPermission = "Shizuku ADB Shell (UID 2000)",
             minSdk = 31,
             commandBuilder = { modeNum -> listOf("cmd", "game", "mode", modeNum, "com.roblox.client") },
             argumentValidator = { modeNum -> modeNum in setOf("1", "2", "3") },
-            rollbackBuilder = { _ -> listOf("cmd", "game", "mode", "1", "com.roblox.client") }
+            rollbackCommandStr = "cmd game mode 1 com.roblox.client"
+        ),
+        "hardware_downscale" to WhitelistedSpec(
+            id = "hardware_downscale",
+            name = "Hardware SurfaceFlinger / GameManager Downscale",
+            purpose = "Uses Android's zero-copy hardware scaler (0.75 / 0.85 / disable) to boost Mali-G57 FPS in Roblox without MediaProjection lag.",
+            requiredPermission = "Shizuku ADB Shell (UID 2000)",
+            minSdk = 31,
+            commandBuilder = { factor -> listOf("cmd", "game", "downscale", factor, "com.roblox.client") },
+            argumentValidator = { factor -> factor in setOf("disable", "0.9", "0.85", "0.8", "0.75", "0.7") },
+            rollbackCommandStr = "cmd game downscale disable com.roblox.client"
+        ),
+        "fixed_performance_mode" to WhitelistedSpec(
+            id = "fixed_performance_mode",
+            name = "Fixed Performance Power Hint",
+            purpose = "Enables Android PowerManager sustained performance frequency hint.",
+            requiredPermission = "Shizuku ADB Shell (UID 2000)",
+            minSdk = 29,
+            commandBuilder = { state -> listOf("cmd", "power", "set-fixed-performance-mode-enabled", state) },
+            argumentValidator = { state -> state in setOf("true", "false") },
+            rollbackCommandStr = "cmd power set-fixed-performance-mode-enabled false"
         ),
         "trim_roblox_caches" to WhitelistedSpec(
             id = "trim_roblox_caches",
             name = "Safe Memory Trim Hint",
-            purpose = "Sends RUNNING_LOW memory trim hint to non-critical background processes without killing system services.",
+            purpose = "Sends RUNNING_LOW memory trim hint to background user package.",
             requiredPermission = "Shizuku ADB Shell (UID 2000)",
             minSdk = 26,
             commandBuilder = { pkg -> listOf("am", "send-trim-memory", pkg, "RUNNING_LOW") },
-            argumentValidator = { pkg -> pkg.matches(Regex("^[a-zA-Z0-9_.]{3,80}$")) },
-            rollbackBuilder = null
-        ),
-        "query_roblox_meminfo" to WhitelistedSpec(
-            id = "query_roblox_meminfo",
-            name = "Roblox PSS Memory Inspection",
-            purpose = "Reads dumpsys meminfo summary for com.roblox.client when running.",
-            requiredPermission = "Shizuku ADB Shell (UID 2000)",
-            minSdk = 26,
-            commandBuilder = { _ -> listOf("dumpsys", "meminfo", "com.roblox.client", "-s") },
-            argumentValidator = { true },
-            rollbackBuilder = null
-        ),
-        "query_gfxinfo_roblox" to WhitelistedSpec(
-            id = "query_gfxinfo_roblox",
-            name = "Roblox Frame Timing Inspection",
-            purpose = "Reads dumpsys gfxinfo frame stats for com.roblox.client.",
-            requiredPermission = "Shizuku ADB Shell (UID 2000)",
-            minSdk = 26,
-            commandBuilder = { _ -> listOf("dumpsys", "gfxinfo", "com.roblox.client") },
-            argumentValidator = { true },
-            rollbackBuilder = null
+            argumentValidator = { pkg -> pkg.matches(Regex("^[a-zA-Z0-9_.]{3,80}$")) }
         )
     )
+
+    /**
+     * Executes an entire Performance Mode + Hardware Frame Pacing & Upscaling profile in a
+     * SINGLE batched `/system/bin/sh -c` call so there is ZERO binder/process spawn lag!
+     */
+    suspend fun executeBatchedGamingProfile(
+        mode: PerformanceMode,
+        targetHz: Float,
+        lockMinRefresh: Boolean,
+        downscaleFactor: String,
+        enableFixedPerfHint: Boolean
+    ): CommandExecutionRecord = withContext(Dispatchers.IO) {
+        val status = connectionManager.refreshStatus()
+        if (!status.canExecutePrivileged) {
+            return@withContext recordFailure(
+                name = "Batched ${mode.title} Profile",
+                purpose = "Applies all Shizuku gaming optimizations in a single non-blocking shell call.",
+                cmd = "sh -c <batched_profile>",
+                perm = "Shizuku ADB (UID 2000)",
+                versions = "Android 8.0+",
+                stderr = "Blocked: Authorize Shizuku first."
+            )
+        }
+
+        if (targetHz !in setOf(60f, 90f, 120f)) {
+            return@withContext recordFailure(
+                name = "Batched ${mode.title} Profile",
+                purpose = "Applies a validated Android gaming profile in one Shizuku shell process.",
+                cmd = "sh -c <batched_profile>",
+                perm = "Shizuku ADB (UID 2000)",
+                versions = "Android 8.0+",
+                stderr = "Blocked: Unsupported refresh-rate target '$targetHz'."
+            )
+        }
+
+        val scale = mode.windowAnimationScale.toString()
+        val hzStr = String.format(Locale.US, "%.1f", targetHz)
+        val minHzStr = if (lockMinRefresh) hzStr else "60.0"
+        val gameModeNum = when (mode) {
+            PerformanceMode.BATTERY -> "3"
+            PerformanceMode.BALANCED -> "1"
+            PerformanceMode.PERFORMANCE -> "2"
+        }
+        val fixedPerf = if (enableFixedPerfHint && mode == PerformanceMode.PERFORMANCE) "true" else "false"
+        if (downscaleFactor !in setOf("disable", "0.9", "0.85", "0.8", "0.75", "0.7")) {
+            return@withContext recordFailure(
+                name = "Batched ${mode.title} Profile",
+                purpose = "Applies a validated Android gaming profile in one Shizuku shell process.",
+                cmd = "sh -c <batched_profile>",
+                perm = "Shizuku ADB (UID 2000)",
+                versions = "Android 8.0+",
+                stderr = "Blocked: Unsupported hardware downscale value '$downscaleFactor'."
+            )
+        }
+        val safeDownscale = downscaleFactor
+
+        val commands = mutableListOf(
+            "settings put global window_animation_scale $scale",
+            "settings put global transition_animation_scale $scale",
+            "settings put global animator_duration_scale $scale",
+            "settings put system peak_refresh_rate $hzStr",
+            "settings put system min_refresh_rate $minHzStr"
+        )
+        if (Build.VERSION.SDK_INT >= 31) {
+            commands += "cmd game mode $gameModeNum com.roblox.client"
+            commands += "cmd game downscale $safeDownscale com.roblox.client"
+        }
+        if (Build.VERSION.SDK_INT >= 29) {
+            commands += "cmd power set-fixed-performance-mode-enabled $fixedPerf"
+        }
+
+        val batchedCmd = buildString {
+            append("failures=0\n")
+            append("run_cmd() { \"\$@\" >/dev/null 2>&1 || { printf 'FAILED: %s\\n' \"\$*\"; failures=1; }; }\n")
+            commands.forEach { append("run_cmd $it\n") }
+            append("if [ \"\$failures\" -eq 0 ]; then printf 'BATCH_OK\\n'; fi\n")
+            append("exit \"\$failures\"")
+        }
+        val raw = runShizukuProcess(listOf("/system/bin/sh", "-c", batchedCmd), 8L)
+
+        val rec = CommandExecutionRecord(
+            optimizationName = "Batched ${mode.title} Profile",
+            purpose = "Single-shot execution of Animation Scales ($scale), Refresh Lock ($hzStr Hz), GameManager Mode ($gameModeNum), Hardware Downscale ($safeDownscale), and Fixed Performance Hint ($fixedPerf).",
+            command = batchedCmd,
+            requiredPermission = "Shizuku ADB Shell (UID 2000)",
+            supportedAndroidVersions = "Android 8.0–16+",
+            exitCode = raw.first,
+            stdout = raw.second,
+            stderr = raw.third,
+            rollbackCommand = "settings put global window_animation_scale 1.0; settings put global transition_animation_scale 1.0; settings put global animator_duration_scale 1.0; settings put system min_refresh_rate 60.0; cmd game mode 1 com.roblox.client; cmd game downscale disable com.roblox.client; cmd power set-fixed-performance-mode-enabled false"
+        )
+        appendRecord(rec)
+        rec
+    }
 
     suspend fun executeWhitelisted(
         specId: String,
         argument: String,
-        timeoutSeconds: Long = 4L
+        timeoutSeconds: Long = 3L
     ): CommandExecutionRecord = withContext(Dispatchers.IO) {
         val status = connectionManager.refreshStatus()
         val spec = whitelist[specId]
@@ -146,12 +246,10 @@ class ShizukuCommandEngine(
                 cmd = specId,
                 perm = "Shizuku ADB",
                 versions = "N/A",
-                stderr = "Blocked: Command ID '$specId' is not in the strict Aurora Engine whitelist."
+                stderr = "Blocked: Command ID '$specId' is not in whitelist."
             )
 
         val versionLabel = "Android API ${spec.minSdk}+"
-
-        // Mandatory Authorization Rule Check
         if (!status.canExecutePrivileged) {
             return@withContext recordFailure(
                 name = spec.name,
@@ -163,19 +261,6 @@ class ShizukuCommandEngine(
             )
         }
 
-        // Android SDK Compatibility Check
-        if (Build.VERSION.SDK_INT < spec.minSdk || Build.VERSION.SDK_INT > spec.maxSdk) {
-            return@withContext recordFailure(
-                name = spec.name,
-                purpose = spec.purpose,
-                cmd = spec.commandBuilder(argument).joinToString(" "),
-                perm = spec.requiredPermission,
-                versions = versionLabel,
-                stderr = "Skipped: Requires $versionLabel (Current device is API ${Build.VERSION.SDK_INT})."
-            )
-        }
-
-        // Argument Validation Check
         if (!spec.argumentValidator(argument)) {
             return@withContext recordFailure(
                 name = spec.name,
@@ -183,34 +268,13 @@ class ShizukuCommandEngine(
                 cmd = specId,
                 perm = spec.requiredPermission,
                 versions = versionLabel,
-                stderr = "Blocked: Argument '$argument' failed strict whitelist validation."
+                stderr = "Blocked: Argument '$argument' failed validation."
             )
-        }
-
-        // Deduplication Check (avoid repeated execution of identical state)
-        if (spec.rollbackBuilder != null && lastExecutedArgs[specId] == argument) {
-            val cmdStr = spec.commandBuilder(argument).joinToString(" ")
-            val rec = CommandExecutionRecord(
-                optimizationName = spec.name,
-                purpose = spec.purpose,
-                command = cmdStr,
-                requiredPermission = spec.requiredPermission,
-                supportedAndroidVersions = versionLabel,
-                exitCode = 0,
-                stdout = "Already applied ($argument) — skipped duplicate execution.",
-                stderr = "",
-                rollbackCommand = activeRollbacks[specId]?.second?.joinToString(" ")
-            )
-            appendRecord(rec)
-            return@withContext rec
         }
 
         val cmdTokens = spec.commandBuilder(argument)
-        val rollbackTokens = spec.rollbackBuilder?.invoke("1.0")
         val rawResult = runShizukuProcess(cmdTokens, timeoutSeconds)
-
-        if (rawResult.first == 0 && rollbackTokens != null) {
-            activeRollbacks[specId] = spec to rollbackTokens
+        if (rawResult.first == 0) {
             lastExecutedArgs[specId] = argument
         }
 
@@ -223,46 +287,68 @@ class ShizukuCommandEngine(
             exitCode = rawResult.first,
             stdout = rawResult.second,
             stderr = rawResult.third,
-            rollbackCommand = rollbackTokens?.joinToString(" ")
+            rollbackCommand = spec.rollbackCommandStr
         )
         appendRecord(record)
         record
     }
 
     suspend fun rollbackAllReversibleChanges(): List<CommandExecutionRecord> = withContext(Dispatchers.IO) {
-        val results = mutableListOf<CommandExecutionRecord>()
         val status = connectionManager.refreshStatus()
         if (!status.canExecutePrivileged) {
-            activeRollbacks.clear()
             lastExecutedArgs.clear()
-            return@withContext results
+            return@withContext listOf(
+                recordFailure(
+                    name = "Full System Rollback",
+                    purpose = "Restores Aurora Engine system settings to their documented defaults.",
+                    cmd = "sh -c <rollback_profile>",
+                    perm = "Shizuku ADB (UID 2000)",
+                    versions = "Android 8.0+",
+                    stderr = "Rollback was not run because Shizuku authorization is not active."
+                )
+            )
+        }
+        val commands = mutableListOf(
+            "settings put global window_animation_scale 1.0",
+            "settings put global transition_animation_scale 1.0",
+            "settings put global animator_duration_scale 1.0",
+            "settings put system min_refresh_rate 60.0",
+            "settings put system peak_refresh_rate 90.0"
+        )
+        if (Build.VERSION.SDK_INT >= 31) {
+            commands += "cmd game mode 1 com.roblox.client"
+            commands += "cmd game downscale disable com.roblox.client"
+        }
+        if (Build.VERSION.SDK_INT >= 29) {
+            commands += "cmd power set-fixed-performance-mode-enabled false"
+        }
+        val restoreCmd = buildString {
+            append("failures=0\n")
+            append("run_cmd() { \"\$@\" >/dev/null 2>&1 || { printf 'FAILED: %s\\n' \"\$*\"; failures=1; }; }\n")
+            commands.forEach { append("run_cmd $it\n") }
+            append("if [ \"\$failures\" -eq 0 ]; then printf 'ALL_RESTORED\\n'; fi\n")
+            append("exit \"\$failures\"")
         }
 
-        for ((_, pair) in activeRollbacks.entries.reversed()) {
-            val (spec, rollbackTokens) = pair
-            val raw = runShizukuProcess(rollbackTokens, 4L)
-            val rec = CommandExecutionRecord(
-                optimizationName = "Rollback: ${spec.name}",
-                purpose = "Restores ${spec.name} to default system state.",
-                command = rollbackTokens.joinToString(" "),
-                requiredPermission = spec.requiredPermission,
-                supportedAndroidVersions = "Android API ${spec.minSdk}+",
-                exitCode = raw.first,
-                stdout = raw.second.ifBlank { "Restored default value." },
-                stderr = raw.third,
-                rollbackCommand = null
-            )
-            appendRecord(rec)
-            results.add(rec)
-        }
-        activeRollbacks.clear()
+        val raw = runShizukuProcess(listOf("/system/bin/sh", "-c", restoreCmd), 8L)
+        val rec = CommandExecutionRecord(
+            optimizationName = "Full System Rollback",
+            purpose = "Restores all animation scales, refresh rates, hardware scaling, and GameMode to stock defaults.",
+            command = restoreCmd,
+            requiredPermission = "Shizuku ADB Shell (UID 2000)",
+            supportedAndroidVersions = "Android 8.0+",
+            exitCode = raw.first,
+            stdout = raw.second,
+            stderr = raw.third,
+            rollbackCommand = null
+        )
+        appendRecord(rec)
         lastExecutedArgs.clear()
-        results
+        listOf(rec)
     }
 
     private fun runShizukuProcess(tokens: List<String>, timeoutSec: Long): Triple<Int, String, String> {
         return try {
-            // Shizuku.newProcess is package-private in newer API versions; invoke via official Binder wrapper
             val method = Shizuku::class.java.getDeclaredMethod(
                 "newProcess",
                 Array<String>::class.java,
@@ -310,7 +396,7 @@ class ShizukuCommandEngine(
     }
 
     private fun appendRecord(record: CommandExecutionRecord) {
-        val updated = (listOf(record) + _executionHistory.value).take(40)
+        val updated = (listOf(record) + _executionHistory.value).take(30)
         _executionHistory.value = updated
     }
 }

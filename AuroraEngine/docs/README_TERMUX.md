@@ -47,10 +47,12 @@ On unrooted 4 GB RAM phones running Android 14+, two platform constraints can af
 2. **Android Phantom Process Killer (`SIGKILL 9`):** Android limits background child processes and RAM consumption for terminal apps.
 
 ### Phone-Only Cloud Build Alternative (GitHub Codespaces / GitHub Actions — Zero PC Required)
-If Android's Phantom Process Killer interrupts heavy compilation on your 4 GB RAM phone, `aurora_engine.zip` includes a ready-to-run GitHub Actions workflow (`.github/workflows/build-aurora-apk.yml`):
-1. Open Chrome on your phone and upload the extracted `AuroraEngine` project to a GitHub repository under your account (`mardhaakshith2013-byte`).
-2. Open the **Actions** tab on GitHub (or open the repository in **GitHub Codespaces** in your mobile browser and run `./gradlew assembleDebug`).
-3. Download the compiled `aurora-engine-debug-apk` artifact (`app-debug.apk`) directly to your phone and tap to install.
+If Android's Phantom Process Killer interrupts heavy compilation on your 4 GB RAM phone, the repository's `.github/workflows/build-aurora-apk.yml` builds release and debug APKs on pushes to `main` or `master` and can also be started manually from the **Actions** tab:
+1. Push the repository to GitHub.
+2. Open the **Actions** tab and run **Build Aurora Engine v2 Smooth APK**, or wait for the workflow after pushing to `main` or `master`.
+3. Download the `aurora-engine-v2-smooth-release-apk` artifact for the optimized, debug-signed release APK, or the debug artifact.
+
+For a manual Codespaces build, use JDK 17 and Gradle 8.5, then run `gradle assembleRelease assembleDebug` from the `AuroraEngine` directory.
 
 ## 4. Connecting Shizuku & Optimizing Roblox After Installation
 

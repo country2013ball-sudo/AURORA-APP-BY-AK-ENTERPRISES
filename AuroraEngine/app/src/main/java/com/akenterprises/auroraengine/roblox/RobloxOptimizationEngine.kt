@@ -1,6 +1,7 @@
 package com.akenterprises.auroraengine.roblox
 
 import android.app.ActivityManager
+import android.content.ActivityNotFoundException
 import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
@@ -10,23 +11,18 @@ import com.akenterprises.auroraengine.core.model.RobloxSessionStatus
 import com.akenterprises.auroraengine.performance.PerformanceModeController
 import com.akenterprises.auroraengine.rammanager.SafeRamManager
 import com.akenterprises.auroraengine.shizuku.ShizukuCommandEngine
-import com.akenterprises.auroraengine.shizuku.ShizukuConnectionManager
+import com.akenterprises.auroraengine.ui.overlay.EdgePanelOverlayService
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 
 /**
- * Dedicated Optimization Module for Roblox (com.roblox.client).
- *
- * Strictly adheres to safety and anti-cheat rules:
- * - Never modifies Roblox APK or internal game files.
- * - Never injects code or modifies Roblox process memory.
- * - Never bypasses Roblox security or anti-cheat.
- * - Operates exclusively through standard Android package visibility, safe memory management,
- *   and Shizuku-authorized Android OS settings.
+ * V2 Roblox Optimization Engine.
+ * Avoids periodic `dumpsys meminfo` process spawning during UI polling.
+ * Automatically starts the In-Game Floating Mini Edge-Panel when launching Roblox if overlay
+ * permission is granted!
  */
 class RobloxOptimizationEngine(
     private val context: Context,
-    private val shizukuConnectionManager: ShizukuConnectionManager,
     private val shizukuCommandEngine: ShizukuCommandEngine,
     private val performanceModeController: PerformanceModeController,
     private val safeRamManager: SafeRamManager
@@ -38,84 +34,92 @@ class RobloxOptimizationEngine(
 
     private var activeSession = false
     private var appliedCount = 0
+    private var cachedInstalled: Boolean? = null
+    private var cachedVersion: String = "Not Installed"
+    private var sessionNotice: String? = null
 
-    suspend fun inspectRobloxStatus(): RobloxSessionStatus = withContext(Dispatchers.IO) {
-        val pm = context.packageManager
-        var installed = false
-        var versionName = "Not Installed"
-
-        try {
-            val info = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-                pm.getPackageInfo(ROBLOX_PACKAGE, PackageManager.PackageInfoFlags.of(0))
-            } else {
-                @Suppress("DEPRECATION")
-                pm.getPackageInfo(ROBLOX_PACKAGE, 0)
+    suspend fun inspectRobloxStatus(forcePackageCheck: Boolean = false): RobloxSessionStatus =
+        withContext(Dispatchers.IO) {
+            if (cachedInstalled == null || forcePackageCheck) {
+                val pm = context.packageManager
+                try {
+                    val info = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                        pm.getPackageInfo(ROBLOX_PACKAGE, PackageManager.PackageInfoFlags.of(0))
+                    } else {
+                        @Suppress("DEPRECATION")
+                        pm.getPackageInfo(ROBLOX_PACKAGE, 0)
+                    }
+                    cachedInstalled = true
+                    cachedVersion = info.versionName ?: "Installed"
+                } catch (_: PackageManager.NameNotFoundException) {
+                    cachedInstalled = false
+                    cachedVersion = "Not Installed"
+                }
             }
-            installed = true
-            versionName = info.versionName ?: "Installed"
-        } catch (_: PackageManager.NameNotFoundException) {
-            installed = false
-        }
 
-        val am = context.getSystemService(Context.ACTIVITY_SERVICE) as ActivityManager
-        val runningProc = am.runningAppProcesses?.firstOrNull {
-            it.processName == ROBLOX_PACKAGE || it.pkgList?.contains(ROBLOX_PACKAGE) == true
-        }
-        var pid = runningProc?.pid
-        var isRunning = pid != null
-
-        // If Shizuku is authorized, we can also check via dumpsys meminfo if standard API visibility is restricted
-        if (!isRunning && installed && shizukuConnectionManager.status.value.canExecutePrivileged) {
-            val memCheck = shizukuCommandEngine.executeWhitelisted("query_roblox_meminfo", "")
-            if (memCheck.isSuccess && memCheck.stdout.contains("pid", ignoreCase = true)) {
-                isRunning = true
-                val match = Regex("pid\\s+(\\d+)", RegexOption.IGNORE_CASE).find(memCheck.stdout)
-                pid = match?.groupValues?.getOrNull(1)?.toIntOrNull()
+            val installed = cachedInstalled ?: false
+            val am = context.getSystemService(Context.ACTIVITY_SERVICE) as ActivityManager
+            val runningProc = am.runningAppProcesses?.firstOrNull {
+                it.processName == ROBLOX_PACKAGE || it.pkgList?.contains(ROBLOX_PACKAGE) == true
             }
-        }
+            val pid = runningProc?.pid
+            val isRunning = pid != null
 
-        val summary = when {
-            !installed -> "Roblox ($ROBLOX_PACKAGE) is not installed on this device."
-            activeSession && isRunning -> "Active Gaming Session • Roblox running (PID ${pid ?: "Active"}) with $appliedCount optimizations."
-            activeSession -> "Session Armed ($appliedCount optimizations ready) • Ready to launch Roblox."
-            isRunning -> "Roblox detected running in background (PID ${pid ?: "Active"})."
-            else -> "Roblox v$versionName installed and ready for optimization."
-        }
+            val statusSummary = when {
+                !installed -> "Roblox ($ROBLOX_PACKAGE) is not installed."
+                activeSession && isRunning -> "Gaming session active • Roblox running (PID ${pid ?: "Active"})."
+                activeSession -> "Gaming profile armed • Roblox is not currently running."
+                isRunning -> "Roblox running (PID ${pid ?: "Active"})."
+                else -> "Roblox v$cachedVersion installed and ready."
+            }
+            val summary = listOfNotNull(statusSummary, sessionNotice).joinToString(" ")
 
-        RobloxSessionStatus(
-            isInstalled = installed,
-            versionName = versionName,
-            isRunning = isRunning,
-            pid = pid,
-            sessionActive = activeSession,
-            appliedOptimizationsCount = appliedCount,
-            statusSummary = summary
-        )
-    }
+            RobloxSessionStatus(
+                isInstalled = installed,
+                versionName = cachedVersion,
+                isRunning = isRunning,
+                pid = pid,
+                sessionActive = activeSession,
+                appliedOptimizationsCount = appliedCount,
+                statusSummary = summary
+            )
+        }
 
     suspend fun startGamingSession(
         mode: PerformanceMode,
         supportedRefreshRates: List<Float>,
         launchRobloxApp: Boolean
     ): RobloxSessionStatus {
-        val shizukuOk = shizukuConnectionManager.refreshStatus().canExecutePrivileged
+        // 1. Safe local memory cleanup; profile execution below batches all Shizuku commands.
+        safeRamManager.performSafeMemoryOptimization(includeShizukuTrim = false)
 
-        // Step 1: Safe RAM cleanup before launching Roblox
-        safeRamManager.performSafeMemoryOptimization(includeShizukuTrim = shizukuOk)
-
-        // Step 2: Apply performance mode settings (animations, refresh rate, GameManager mode)
+        // 2. Single batched Shizuku profile execution
         val modeReport = performanceModeController.applyMode(
             mode = mode,
             supportedRefreshRates = supportedRefreshRates
         )
 
         activeSession = true
-        appliedCount = if (shizukuOk) modeReport.records.count { it.isSuccess } + 1 else 1
+        appliedCount = modeReport.records.count { it.isSuccess }
+        sessionNotice = modeReport.summary
 
-        // Step 3: Launch Roblox if installed and requested by user
-        val currentStatus = inspectRobloxStatus()
+        // 3. Auto-launch In-Game Floating Mini Edge-Panel if overlay permission is granted
+        if (android.provider.Settings.canDrawOverlays(context) && !EdgePanelOverlayService.isOverlayRunning) {
+            try {
+                context.startForegroundService(Intent(context, EdgePanelOverlayService::class.java))
+            } catch (e: IllegalStateException) {
+                sessionNotice = "The overlay could not start because Android disallowed a background foreground-service start: ${e.message}"
+            } catch (e: SecurityException) {
+                sessionNotice = "The overlay could not start: ${e.message}"
+            }
+        }
+
+        // 4. Launch Roblox
+        val currentStatus = inspectRobloxStatus(forcePackageCheck = true)
         if (launchRobloxApp && currentStatus.isInstalled) {
-            launchRoblox()
+            if (!launchRoblox()) {
+                sessionNotice = "The gaming profile is active, but Android could not launch Roblox."
+            }
         }
 
         return inspectRobloxStatus()
@@ -124,7 +128,11 @@ class RobloxOptimizationEngine(
     suspend fun stopGamingSessionAndRestore(): RobloxSessionStatus {
         activeSession = false
         appliedCount = 0
-        shizukuCommandEngine.rollbackAllReversibleChanges()
+        val rollbackRecords = shizukuCommandEngine.rollbackAllReversibleChanges()
+        sessionNotice = rollbackRecords
+            .filterNot { it.isSuccess }
+            .takeIf { it.isNotEmpty() }
+            ?.joinToString(prefix = "Rollback incomplete: ") { it.stderr.ifBlank { it.stdout } }
         return inspectRobloxStatus()
     }
 
@@ -138,7 +146,9 @@ class RobloxOptimizationEngine(
             } else {
                 false
             }
-        } catch (_: Throwable) {
+        } catch (_: ActivityNotFoundException) {
+            false
+        } catch (_: SecurityException) {
             false
         }
     }

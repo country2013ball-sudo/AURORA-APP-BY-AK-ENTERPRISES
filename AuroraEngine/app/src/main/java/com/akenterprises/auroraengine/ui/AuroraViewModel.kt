@@ -16,10 +16,12 @@ import com.akenterprises.auroraengine.roblox.RobloxOptimizationEngine
 import com.akenterprises.auroraengine.shizuku.ShizukuCommandEngine
 import com.akenterprises.auroraengine.shizuku.ShizukuConnectionManager
 import com.akenterprises.auroraengine.ui.overlay.EdgePanelOverlayService
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.*
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 
 data class AuroraUiState(
     val selectedTab: EdgeTab = EdgeTab.PERFORMANCE,
@@ -41,11 +43,11 @@ data class AuroraUiState(
         pid = null,
         sessionActive = false,
         appliedOptimizationsCount = 0,
-        statusSummary = "Inspecting Roblox installation..."
+        statusSummary = "Ready"
     ),
     val frameBenchmark: NativeFrameProcessor.FrameBenchmarkResult? = null,
     val lastRamCleanSummary: String? = null,
-    val statusBannerMessage: String = "Aurora Engine Ready • Select a mode or connect Shizuku.",
+    val statusBannerMessage: String = "Aurora Engine v2.0 Smooth Edition Ready.",
     val overlayPermissionGranted: Boolean = false,
     val isOverlayServiceActive: Boolean = false
 )
@@ -62,7 +64,7 @@ class AuroraViewModel(application: Application) : AndroidViewModel(application) 
         prefs, shizukuConnectionManager, shizukuCommandEngine
     )
     val robloxEngine = RobloxOptimizationEngine(
-        appContext, shizukuConnectionManager, shizukuCommandEngine,
+        appContext, shizukuCommandEngine,
         performanceModeController, safeRamManager
     )
 
@@ -92,57 +94,54 @@ class AuroraViewModel(application: Application) : AndroidViewModel(application) 
                     _uiState.update {
                         it.copy(
                             shizukuStatus = shizukuConnectionManager.status.value,
-                            statusBannerMessage = "Shizuku disconnected. Privileged operations halted immediately."
+                            statusBannerMessage = "Shizuku disconnected. Privileged operations halted."
                         )
                     }
                 }
             }
         )
 
-        viewModelScope.launch {
-            shizukuConnectionManager.status.collect { status ->
-                _uiState.update { it.copy(shizukuStatus = status) }
+        viewModelScope.launch(Dispatchers.IO) {
+            val bench = withContext(Dispatchers.Default) {
+                NativeFrameProcessor.runRealTimeCapabilityBenchmark()
             }
-        }
-
-        // Run initial hardware benchmark and start periodic telemetry loop
-        viewModelScope.launch {
-            val bench = NativeFrameProcessor.runRealTimeCapabilityBenchmark()
             _uiState.update { it.copy(frameBenchmark = bench) }
-            refreshAllTelemetry(includePing = true)
+            refreshAllTelemetryNow(includePing = false)
             startTelemetryLoop()
         }
     }
 
     private fun startTelemetryLoop() {
         telemetryJob?.cancel()
-        telemetryJob = viewModelScope.launch {
-            var tick = 0
+        telemetryJob = viewModelScope.launch(Dispatchers.IO) {
             while (true) {
+                delay(4000L)
                 if (_uiState.value.telemetryPolling) {
-                    refreshAllTelemetry(includePing = (tick % 4 == 0))
-                    tick++
+                    refreshAllTelemetryNow(includePing = false)
                 }
-                delay(2500L)
             }
         }
     }
 
     fun refreshAllTelemetry(includePing: Boolean = false) {
-        viewModelScope.launch {
-            val shizuku = shizukuConnectionManager.refreshStatus()
-            val hw = telemetryMonitor.sampleDeviceProfile(includeNetworkPing = includePing)
-            val roblox = robloxEngine.inspectRobloxStatus()
-            val canOverlay = Settings.canDrawOverlays(appContext)
-            _uiState.update {
-                it.copy(
-                    shizukuStatus = shizuku,
-                    hardwareProfile = hw,
-                    robloxStatus = roblox,
-                    overlayPermissionGranted = canOverlay,
-                    isOverlayServiceActive = EdgePanelOverlayService.isOverlayRunning
-                )
-            }
+        viewModelScope.launch(Dispatchers.IO) {
+            refreshAllTelemetryNow(includePing)
+        }
+    }
+
+    private suspend fun refreshAllTelemetryNow(includePing: Boolean) {
+        val shizuku = shizukuConnectionManager.refreshStatus()
+        val hw = telemetryMonitor.sampleDeviceProfile(includeNetworkPing = includePing)
+        val roblox = robloxEngine.inspectRobloxStatus()
+        val canOverlay = Settings.canDrawOverlays(appContext)
+        _uiState.update {
+            it.copy(
+                shizukuStatus = shizuku,
+                hardwareProfile = hw,
+                robloxStatus = roblox,
+                overlayPermissionGranted = canOverlay,
+                isOverlayServiceActive = EdgePanelOverlayService.isOverlayRunning
+            )
         }
     }
 
@@ -155,7 +154,7 @@ class AuroraViewModel(application: Application) : AndroidViewModel(application) 
     }
 
     fun selectPerformanceMode(mode: PerformanceMode) {
-        viewModelScope.launch {
+        viewModelScope.launch(Dispatchers.IO) {
             val supportedHz = _uiState.value.hardwareProfile?.supportedRefreshRatesHz ?: listOf(60f, 90f, 120f)
             val report = performanceModeController.applyMode(
                 mode = mode,
@@ -169,7 +168,6 @@ class AuroraViewModel(application: Application) : AndroidViewModel(application) 
                     statusBannerMessage = report.summary
                 )
             }
-            refreshAllTelemetry()
         }
     }
 
@@ -180,25 +178,29 @@ class AuroraViewModel(application: Application) : AndroidViewModel(application) 
     }
 
     fun selectTargetRefreshRate(hz: Float) {
-        viewModelScope.launch {
+        viewModelScope.launch(Dispatchers.IO) {
+            val supportedHz = _uiState.value.hardwareProfile?.supportedRefreshRatesHz ?: listOf(60f, 90f, 120f)
+            if (hz !in supportedHz || hz !in setOf(60f, 90f, 120f)) {
+                _uiState.update {
+                    it.copy(statusBannerMessage = "The selected ${hz.toInt()} Hz target is not supported by this display.")
+                }
+                return@launch
+            }
             prefs.targetRefreshRateHz = hz
             val shizuku = shizukuConnectionManager.refreshStatus()
             if (shizuku.canExecutePrivileged) {
-                val arg = String.format("%.1f", hz)
-                val rec = shizukuCommandEngine.executeWhitelisted("peak_refresh_rate", arg)
+                val report = performanceModeController.applyMode(
+                    mode = _uiState.value.performanceMode,
+                    touchProfile = _uiState.value.touchProfile,
+                    supportedRefreshRates = supportedHz,
+                    targetRefreshRate = hz
+                )
                 _uiState.update {
-                    it.copy(
-                        statusBannerMessage = if (rec.isSuccess) {
-                            "Requested ${hz.toInt()} Hz peak display refresh rate via Shizuku."
-                        } else {
-                            "Refresh rate request note: ${rec.stderr}"
-                        }
-                    )
+                    it.copy(statusBannerMessage = report.summary)
                 }
-                refreshAllTelemetry()
             } else {
                 _uiState.update {
-                    it.copy(statusBannerMessage = "Saved ${hz.toInt()} Hz preference. Authorize Shizuku to apply system peak refresh rate.")
+                    it.copy(statusBannerMessage = "Saved ${hz.toInt()} Hz preference. Authorize Shizuku to lock display refresh rate.")
                 }
             }
         }
@@ -217,9 +219,8 @@ class AuroraViewModel(application: Application) : AndroidViewModel(application) 
     }
 
     fun runSafeRamBoost() {
-        viewModelScope.launch {
-            val shizukuOk = shizukuConnectionManager.refreshStatus().canExecutePrivileged
-            val res = safeRamManager.performSafeMemoryOptimization(includeShizukuTrim = shizukuOk)
+        viewModelScope.launch(Dispatchers.IO) {
+            val res = safeRamManager.performSafeMemoryOptimization(includeShizukuTrim = false)
             val hw = telemetryMonitor.sampleDeviceProfile()
             _uiState.update {
                 it.copy(
@@ -232,13 +233,13 @@ class AuroraViewModel(application: Application) : AndroidViewModel(application) 
     }
 
     fun startGaming(launchRoblox: Boolean) {
-        viewModelScope.launch {
+        viewModelScope.launch(Dispatchers.IO) {
             val shizuku = shizukuConnectionManager.refreshStatus()
             if (!shizuku.canExecutePrivileged) {
                 _uiState.update {
                     it.copy(
                         selectedTab = EdgeTab.SHIZUKU,
-                        statusBannerMessage = "Mandatory Rule: Connect & authorize Shizuku before executing privileged START GAMING optimizations."
+                        statusBannerMessage = "Authorize Shizuku first before executing START GAMING optimizations."
                     )
                 }
                 return@launch
@@ -252,6 +253,7 @@ class AuroraViewModel(application: Application) : AndroidViewModel(application) 
             _uiState.update {
                 it.copy(
                     robloxStatus = status,
+                    isOverlayServiceActive = EdgePanelOverlayService.isOverlayRunning,
                     statusBannerMessage = status.statusSummary
                 )
             }
@@ -259,14 +261,15 @@ class AuroraViewModel(application: Application) : AndroidViewModel(application) 
     }
 
     fun stopGamingAndRestore() {
-        viewModelScope.launch {
+        viewModelScope.launch(Dispatchers.IO) {
             stopMediaProjectionCapture()
             val status = robloxEngine.stopGamingSessionAndRestore()
+            prefs.frameGenMultiplier = FrameGenMultiplier.OFF
             _uiState.update {
                 it.copy(
                     robloxStatus = status,
                     frameGenMultiplier = FrameGenMultiplier.OFF,
-                    statusBannerMessage = "Gaming session ended. All reversible Shizuku settings restored."
+                    statusBannerMessage = "Gaming session ended. All Shizuku settings restored to stock defaults."
                 )
             }
         }
@@ -276,18 +279,15 @@ class AuroraViewModel(application: Application) : AndroidViewModel(application) 
         if (mode == UpscalingMode.NVIDIA_DLSS_UNSUPPORTED) {
             _uiState.update {
                 it.copy(
-                    statusBannerMessage = "Hardware Notice: NVIDIA DLSS requires NVIDIA Tensor Cores and is unsupported on ARM Mali GPUs. Use Supported CAS or Experimental AI Upscaling."
+                    statusBannerMessage = "Hardware Notice: NVIDIA DLSS requires NVIDIA Tensor Cores. Use Supported CAS or Experimental AI Upscaling (Hardware GameManager Downscale)."
                 )
             }
             return
         }
         prefs.upscalingMode = mode
-        _uiState.update {
-            it.copy(
-                upscalingMode = mode,
-                statusBannerMessage = "Upscaling mode set to: ${mode.label}"
-            )
-        }
+        _uiState.update { it.copy(upscalingMode = mode) }
+        // Immediately apply zero-copy hardware scaling if Shizuku is connected
+        selectPerformanceMode(_uiState.value.performanceMode)
     }
 
     fun updateCasSharpness(value: Float) {
@@ -296,7 +296,7 @@ class AuroraViewModel(application: Application) : AndroidViewModel(application) 
     }
 
     fun rerunGraphicsBenchmark() {
-        viewModelScope.launch {
+        viewModelScope.launch(Dispatchers.Default) {
             val bench = NativeFrameProcessor.runRealTimeCapabilityBenchmark()
             _uiState.update {
                 it.copy(
@@ -307,11 +307,23 @@ class AuroraViewModel(application: Application) : AndroidViewModel(application) 
         }
     }
 
+    /**
+     * The experimental multiplier requests hardware refresh pacing and GameManager downscaling.
+     * It does not start MediaProjection or claim to generate frames for the running game.
+     */
     fun setFrameGenMultiplierSelection(mult: FrameGenMultiplier) {
         prefs.frameGenMultiplier = mult
         _uiState.update { it.copy(frameGenMultiplier = mult) }
         if (mult == FrameGenMultiplier.OFF) {
             stopMediaProjectionCapture()
+            selectPerformanceMode(_uiState.value.performanceMode)
+        } else {
+            viewModelScope.launch(Dispatchers.IO) {
+                val report = performanceModeController.applyFramePacing(mult)
+                _uiState.update {
+                    it.copy(statusBannerMessage = report?.summary ?: "Frame pacing is turned off.")
+                }
+            }
         }
     }
 
@@ -328,16 +340,13 @@ class AuroraViewModel(application: Application) : AndroidViewModel(application) 
     }
 
     fun stopMediaProjectionCapture() {
-        val intent = Intent(appContext, FrameGenerationService::class.java).apply {
-            action = FrameGenerationService.ACTION_STOP_CAPTURE
-        }
-        appContext.startService(intent)
+        appContext.stopService(Intent(appContext, FrameGenerationService::class.java))
     }
 
     fun toggleFloatingOverlayService() {
         if (!Settings.canDrawOverlays(appContext)) {
             _uiState.update {
-                it.copy(statusBannerMessage = "Grant 'Display over other apps' permission first to enable the floating Edge Handle.")
+                it.copy(statusBannerMessage = "Tap 'Overlay Permission' first and enable 'Display over other apps' for Aurora Engine.")
             }
             return
         }
@@ -347,7 +356,7 @@ class AuroraViewModel(application: Application) : AndroidViewModel(application) 
             _uiState.update {
                 it.copy(
                     isOverlayServiceActive = false,
-                    statusBannerMessage = "Floating Edge Panel handle stopped."
+                    statusBannerMessage = "In-Game Floating Mini Edge-Panel stopped."
                 )
             }
         } else {
@@ -355,7 +364,7 @@ class AuroraViewModel(application: Application) : AndroidViewModel(application) 
             _uiState.update {
                 it.copy(
                     isOverlayServiceActive = true,
-                    statusBannerMessage = "Floating Edge Panel handle started on left screen edge."
+                    statusBannerMessage = "In-Game Floating Mini Edge-Panel active! Tap the 'AE' edge pill inside Roblox to open the mini panel without leaving your game."
                 )
             }
         }
@@ -379,7 +388,7 @@ class AuroraViewModel(application: Application) : AndroidViewModel(application) 
     }
 
     fun resetAllSettings() {
-        viewModelScope.launch {
+        viewModelScope.launch(Dispatchers.IO) {
             stopMediaProjectionCapture()
             shizukuCommandEngine.rollbackAllReversibleChanges()
             prefs.resetAllSettings()
@@ -393,7 +402,7 @@ class AuroraViewModel(application: Application) : AndroidViewModel(application) 
                     autoDetectRoblox = true,
                     smoothAnimations = true,
                     telemetryPolling = true,
-                    statusBannerMessage = "All Aurora Engine preferences and reversible Shizuku settings have been reset to defaults."
+                    statusBannerMessage = "All settings reset and Shizuku changes rolled back."
                 )
             }
         }

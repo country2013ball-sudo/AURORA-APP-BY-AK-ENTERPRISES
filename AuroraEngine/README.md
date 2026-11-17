@@ -1,5 +1,17 @@
 # Aurora Engine by AK Enterprises — Termux Build & Installation Guide
 
+## Desktop / GitHub Codespaces Build
+
+Use JDK 17, Gradle 8.5, and Android SDK Platform 34. From this directory run:
+
+```sh
+gradle assembleRelease assembleDebug
+```
+
+The optimized, debug-signed release APK is `app/build/outputs/apk/release/app-release.apk`.
+The debug APK is `app/build/outputs/apk/debug/app-debug.apk`. The release APK is for
+direct testing and is not signed for Play Store publishing.
+
 **Application Name:** Aurora Engine  
 **Developer Branding:** AK Enterprises  
 **Package ID:** `com.akenterprises.auroraengine`  

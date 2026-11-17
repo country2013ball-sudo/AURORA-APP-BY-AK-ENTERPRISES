@@ -42,4 +42,12 @@ class AuroraEngineUnitTest {
         val multipliers = FrameGenMultiplier.entries.map { it.multiplier }
         assertEquals(listOf(1, 2, 3, 4), multipliers)
     }
+
+    @Test
+    fun experimentalPacingMapsMultipliersToSupportedDownscaleRequests() {
+        assertEquals("0.85", FrameGenMultiplier.X2.hardwareDownscale)
+        assertEquals("0.8", FrameGenMultiplier.X3.hardwareDownscale)
+        assertEquals("0.75", FrameGenMultiplier.X4.hardwareDownscale)
+        assertNull(FrameGenMultiplier.OFF.hardwareDownscale)
+    }
 }

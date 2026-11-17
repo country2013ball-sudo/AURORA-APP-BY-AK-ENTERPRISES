@@ -11,8 +11,8 @@ android {
         applicationId = "com.akenterprises.auroraengine"
         minSdk = 26
         targetSdk = 34
-        versionCode = 100
-        versionName = "1.0.0-AURORA"
+        versionCode = 200
+        versionName = "2.0.0-SMOOTH"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         vectorDrawables {
@@ -33,6 +33,7 @@ android {
 
     buildTypes {
         release {
+            signingConfig = signingConfigs.getByName("debug")
             isMinifyEnabled = true
             isShrinkResources = true
             proguardFiles(
@@ -43,7 +44,7 @@ android {
         debug {
             isMinifyEnabled = false
             applicationIdSuffix = ""
-            versionNameSuffix = "-debug"
+            versionNameSuffix = "-v2-smooth"
         }
     }
 
@@ -54,6 +55,10 @@ android {
 
     kotlinOptions {
         jvmTarget = "17"
+        freeCompilerArgs += listOf(
+            "-P",
+            "plugin:androidx.compose.compiler.plugins.kotlin:intrinsicRemember=true"
+        )
     }
 
     buildFeatures {

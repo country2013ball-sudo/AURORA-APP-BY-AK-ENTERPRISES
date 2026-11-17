@@ -1,16 +1,11 @@
 package com.akenterprises.auroraengine
 
-import android.app.Activity
-import android.content.Context
 import android.content.Intent
-import android.media.projection.MediaProjectionManager
 import android.net.Uri
 import android.os.Bundle
 import android.provider.Settings
 import androidx.activity.ComponentActivity
-import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
-import androidx.activity.result.contract.ActivityResultContracts
 import androidx.activity.viewModels
 import androidx.compose.animation.*
 import androidx.compose.animation.core.FastOutSlowInEasing
@@ -54,16 +49,6 @@ class MainActivity : ComponentActivity() {
             val frameTelemetry by viewModel.frameGenTelemetry.collectAsState()
             val context = LocalContext.current
 
-            val projectionLauncher = rememberLauncherForActivityResult(
-                contract = ActivityResultContracts.StartActivityForResult()
-            ) { result ->
-                if (result.resultCode == Activity.RESULT_OK && result.data != null) {
-                    viewModel.startMediaProjectionCapture(result.resultCode, result.data!!)
-                } else {
-                    viewModel.setFrameGenMultiplierSelection(FrameGenMultiplier.OFF)
-                }
-            }
-
             MaterialTheme(
                 colorScheme = darkColorScheme(
                     primary = Color(state.performanceMode.accentHex),
@@ -88,13 +73,7 @@ class MainActivity : ComponentActivity() {
                     onSelectUpscaling = viewModel::selectUpscalingMode,
                     onUpdateSharpness = viewModel::updateCasSharpness,
                     onRerunBenchmark = viewModel::rerunGraphicsBenchmark,
-                    onSelectFrameGen = { mult ->
-                        viewModel.setFrameGenMultiplierSelection(mult)
-                        if (mult != FrameGenMultiplier.OFF) {
-                            val mpm = context.getSystemService(Context.MEDIA_PROJECTION_SERVICE) as MediaProjectionManager
-                            projectionLauncher.launch(mpm.createScreenCaptureIntent())
-                        }
-                    },
+                    onSelectFrameGen = viewModel::setFrameGenMultiplierSelection,
                     onStopFrameGen = {
                         viewModel.setFrameGenMultiplierSelection(FrameGenMultiplier.OFF)
                     },
@@ -1093,10 +1072,10 @@ private fun GraphicsTechnologyContent(
 
     Spacer(modifier = Modifier.height(12.dp))
 
-    Text("B. LSFG-Inspired Multi-Frame Generation (Experimental)", color = Color.White, fontSize = 13.sp, fontWeight = FontWeight.Bold)
+    Text("B. LSFG-Inspired Hardware Frame Pacing (Experimental)", color = Color.White, fontSize = 13.sp, fontWeight = FontWeight.Bold)
     Text(
-        text = "Uses Android MediaProjection + bounded ImageReader buffers + C++17 block optical flow. " +
-            "Does not inject frames into Roblox's internal engine or alter server simulation FPS.",
+        text = "Requests Android GameManager downscaling and display refresh pacing. " +
+            "This does not synthesize Roblox frames or alter its internal simulation FPS.",
         color = Color(0xFF8A94A6),
         fontSize = 10.sp
     )

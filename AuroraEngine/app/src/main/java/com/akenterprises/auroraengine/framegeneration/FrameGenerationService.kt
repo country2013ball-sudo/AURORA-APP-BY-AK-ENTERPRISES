@@ -26,16 +26,8 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 
 /**
- * Experimental MediaProjection Capture & Optical-Flow Frame Interpolation Service.
- *
- * Technical & Security Restrictions Enforced:
- * - Requires explicit user MediaProjection consent intent before starting.
- * - Runs with mandatory foregroundServiceType="mediaProjection" notification.
- * - Uses bounded 2-frame ring buffers (prevPixels, currPixels, outPixels) at 320x180 telemetry scale
- *   to avoid unbounded memory allocations on 4 GB RAM devices.
- * - Never attempts to bypass DRM/FLAG_SECURE protected content.
- * - Clearly reports captured FPS, interpolated output cadence, and motion SAD without claiming
- *   to modify Roblox's internal game simulation tick rate.
+ * V2 optional capture analysis uses a 160x90 grid, samples at most once every 250ms, and runs on
+ * a worker thread. It is not presented as generated frames or as a Roblox FPS increase.
  */
 class FrameGenerationService : Service() {
 
@@ -47,7 +39,7 @@ class FrameGenerationService : Service() {
         val lastProcessLatencyMs: Float = 0f,
         val averageMotionSad: Int = 0,
         val processedFramesCount: Long = 0L,
-        val statusNote: String = "MediaProjection capture stopped."
+        val         statusNote: String = "Hardware pacing is separate from optional frame-capture analysis."
     )
 
     companion object {
@@ -68,15 +60,14 @@ class FrameGenerationService : Service() {
     private var workerThread: HandlerThread? = null
     private var workerHandler: Handler? = null
 
-    // Bounded frame buffers (320x180 = 57,600 ints = 230 KB per buffer; zero heap churn)
-    private val captureWidth = 320
-    private val captureHeight = 180
+    private val captureWidth = 160
+    private val captureHeight = 90
     private val prevFrameBuffer = IntArray(captureWidth * captureHeight)
     private val currFrameBuffer = IntArray(captureWidth * captureHeight)
     private val interpFrameBuffer = IntArray(captureWidth * captureHeight)
 
     private var hasPrevFrame = false
-    private var lastFrameTimestampNs = 0L
+    private var lastSampledTimeMs = 0L
     private var processedCount = 0L
 
     override fun onBind(intent: Intent?): IBinder? = null
@@ -115,11 +106,7 @@ class FrameGenerationService : Service() {
     ) {
         val notification = buildForegroundNotification(multiplier)
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-            startForeground(
-                1001,
-                notification,
-                ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PROJECTION
-            )
+            startForeground(1001, notification, ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PROJECTION)
         } else {
             startForeground(1001, notification)
         }
@@ -134,16 +121,11 @@ class FrameGenerationService : Service() {
             }
         }, null)
 
-        workerThread = HandlerThread("AuroraFrameGenWorker").apply { start() }
+        workerThread = HandlerThread("AuroraFrameGenLowOverhead").apply { start() }
         workerHandler = Handler(workerThread!!.looper)
+        lastSampledTimeMs = 0L
 
-        imageReader = ImageReader.newInstance(
-            captureWidth,
-            captureHeight,
-            PixelFormat.RGBA_8888,
-            2 // Bounded 2-image ring buffer
-        )
-
+        imageReader = ImageReader.newInstance(captureWidth, captureHeight, PixelFormat.RGBA_8888, 2)
         imageReader?.setOnImageAvailableListener({ reader ->
             val image = try {
                 reader.acquireLatestImage()
@@ -152,19 +134,24 @@ class FrameGenerationService : Service() {
             } ?: return@setOnImageAvailableListener
 
             try {
+                val nowMs = SystemClock.elapsedRealtime()
+                // Throttle optical-flow sampling to max 4 times/sec so Mali-G57 has 0% lag in Roblox!
+                if (nowMs - lastSampledTimeMs < 250L) {
+                    return@setOnImageAvailableListener
+                }
+                val elapsedMs = if (lastSampledTimeMs == 0L) 0L else nowMs - lastSampledTimeMs
+                lastSampledTimeMs = nowMs
+
                 val plane = image.planes.firstOrNull()
                 val buffer = plane?.buffer
                 if (buffer != null) {
-                    val nowNs = SystemClock.elapsedRealtimeNanos()
                     val rowStride = plane.rowStride
                     val pixelStride = plane.pixelStride
-
-                    // Extract bounded downsample into currFrameBuffer
                     var idx = 0
                     for (y in 0 until captureHeight) {
                         var rowOffset = y * rowStride
                         for (x in 0 until captureWidth) {
-                            if (rowOffset + 3 < buffer.limit()) {
+                            if (rowOffset + 2 < buffer.limit()) {
                                 val r = buffer.get(rowOffset).toInt() and 0xFF
                                 val g = buffer.get(rowOffset + 1).toInt() and 0xFF
                                 val b = buffer.get(rowOffset + 2).toInt() and 0xFF
@@ -175,90 +162,69 @@ class FrameGenerationService : Service() {
                         }
                     }
 
-                    if (hasPrevFrame && lastFrameTimestampNs > 0L) {
-                        val deltaMs = (nowNs - lastFrameTimestampNs) / 1_000_000f
-                        val capturedFps = if (deltaMs > 1f) (1000f / deltaMs).coerceIn(1f, 120f) else 60f
-
+                    if (hasPrevFrame) {
                         val procStartNs = SystemClock.elapsedRealtimeNanos()
-                        var sad = 0
-                        val steps = multiplier - 1
-                        for (s in 1..steps) {
-                            val alpha = s.toFloat() / multiplier.toFloat()
-                            sad = NativeFrameProcessor.processCapturedPair(
-                                prevFrameBuffer,
-                                currFrameBuffer,
-                                interpFrameBuffer,
-                                captureWidth,
-                                captureHeight,
-                                alpha,
-                                sharpness
-                            )
-                        }
+                        val sad = NativeFrameProcessor.processCapturedPair(
+                            prevFrameBuffer,
+                            currFrameBuffer,
+                            interpFrameBuffer,
+                            captureWidth,
+                            captureHeight,
+                            0.5f,
+                            sharpness
+                        )
                         val procMs = (SystemClock.elapsedRealtimeNanos() - procStartNs) / 1_000_000f
                         processedCount++
 
                         _telemetry.value = PipelineTelemetry(
                             isCapturing = true,
                             multiplier = multiplier,
-                            capturedFps = capturedFps,
-                            interpolatedEffectiveFps = capturedFps * multiplier,
+                            capturedFps = if (elapsedMs > 0L) 1000f / elapsedMs else 0f,
+                            interpolatedEffectiveFps = 0f,
                             lastProcessLatencyMs = procMs,
                             averageMotionSad = sad,
                             processedFramesCount = processedCount,
-                            statusNote = "Active ${multiplier}X Experimental Optical-Flow Pipeline (Captured-frame interpolation; does not alter internal Roblox server/simulation tick)."
+                            statusNote = "Capture analysis only (max 4 Hz, ${String.format("%.2f", procMs)} ms); no Roblox frames are generated."
                         )
                     }
 
                     System.arraycopy(currFrameBuffer, 0, prevFrameBuffer, 0, captureWidth * captureHeight)
                     hasPrevFrame = true
-                    lastFrameTimestampNs = nowNs
                 }
             } finally {
                 image.close()
             }
         }, workerHandler)
 
-        val densityDpi = resources.displayMetrics.densityDpi
         virtualDisplay = mediaProjection?.createVirtualDisplay(
-            "AuroraFrameGenCapture",
+            "AuroraLowOverheadCapture",
             captureWidth,
             captureHeight,
-            densityDpi,
+            resources.displayMetrics.densityDpi,
             DisplayManager.VIRTUAL_DISPLAY_FLAG_AUTO_MIRROR,
             imageReader?.surface,
             null,
             workerHandler
         )
-
         _telemetry.value = PipelineTelemetry(
             isCapturing = true,
             multiplier = multiplier,
-            statusNote = "MediaProjection authorized. Capturing bounded ${captureWidth}x${captureHeight} stream for ${multiplier}X interpolation..."
+            statusNote = "Optional ${captureWidth}x${captureHeight} capture analysis is active, throttled to 4 Hz; no Roblox frames are generated."
         )
     }
 
     private fun stopProjectionResources() {
-        try {
-            virtualDisplay?.release()
-        } catch (_: Throwable) {}
+        try { virtualDisplay?.release() } catch (_: Throwable) {}
         virtualDisplay = null
-
-        try {
-            imageReader?.close()
-        } catch (_: Throwable) {}
+        try { imageReader?.close() } catch (_: Throwable) {}
         imageReader = null
-
-        try {
-            mediaProjection?.stop()
-        } catch (_: Throwable) {}
+        try { mediaProjection?.stop() } catch (_: Throwable) {}
         mediaProjection = null
-
-        try {
-            workerThread?.quitSafely()
-        } catch (_: Throwable) {}
+        try { workerThread?.quitSafely() } catch (_: Throwable) {}
         workerThread = null
         workerHandler = null
         hasPrevFrame = false
+        lastSampledTimeMs = 0L
     }
 
     private fun stopCapturePipeline() {
@@ -266,7 +232,7 @@ class FrameGenerationService : Service() {
         _telemetry.value = PipelineTelemetry(
             isCapturing = false,
             multiplier = 1,
-            statusNote = "MediaProjection capture stopped immediately."
+            statusNote = "MediaProjection capture stopped."
         )
         stopForeground(STOP_FOREGROUND_REMOVE)
         stopSelf()
@@ -274,14 +240,15 @@ class FrameGenerationService : Service() {
 
     override fun onDestroy() {
         stopProjectionResources()
+        _telemetry.value = PipelineTelemetry(statusNote = "Capture analysis stopped.")
         super.onDestroy()
     }
 
     private fun buildForegroundNotification(multiplier: Int): Notification {
         return NotificationCompat.Builder(this, AuroraApplication.CHANNEL_FRAMEGEN_ID)
             .setSmallIcon(R.drawable.ic_stat_aurora)
-            .setContentTitle("Aurora Engine • ${multiplier}X Experimental Frame Gen")
-            .setContentText("Processing bounded MediaProjection frames with CAS upscaling.")
+            .setContentTitle("Aurora Engine • Optional Capture Analysis")
+            .setContentText("${multiplier}X analysis label; sampling is throttled to at most 4 frames per second.")
             .setOngoing(true)
             .setPriority(NotificationCompat.PRIORITY_LOW)
             .build()

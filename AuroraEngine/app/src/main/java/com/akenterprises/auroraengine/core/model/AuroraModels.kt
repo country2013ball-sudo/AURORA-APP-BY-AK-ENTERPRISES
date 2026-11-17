@@ -86,12 +86,13 @@ enum class FrameGenMultiplier(
     val multiplier: Int,
     val label: String,
     val targetFrameBudgetMs: Double,
-    val isExperimental: Boolean
+    val isExperimental: Boolean,
+    val hardwareDownscale: String?
 ) {
-    OFF(1, "OFF", 0.0, false),
-    X2(2, "2X Experimental", 14.0, true),
-    X3(3, "3X Experimental", 9.5, true),
-    X4(4, "4X Experimental", 7.0, true)
+    OFF(1, "OFF", 0.0, false, null),
+    X2(2, "2X Experimental", 14.0, true, "0.85"),
+    X3(3, "3X Experimental", 9.5, true, "0.8"),
+    X4(4, "4X Experimental", 7.0, true, "0.75")
 }
 
 enum class EdgeTab(val title: String) {
