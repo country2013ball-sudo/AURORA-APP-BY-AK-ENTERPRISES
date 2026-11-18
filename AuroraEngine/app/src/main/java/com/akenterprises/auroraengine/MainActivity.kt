@@ -124,14 +124,9 @@ class MainActivity : ComponentActivity() {
 
     override fun onResume() {
         super.onResume()
-        viewModel.startFrameRateMonitoring()
         viewModel.refreshAllTelemetry()
     }
 
-    override fun onPause() {
-        viewModel.stopFrameRateMonitoring()
-        super.onPause()
-    }
 }
 
 @Composable
@@ -258,10 +253,8 @@ fun AuroraEdgePanelRoot(
 
                             Spacer(modifier = Modifier.height(12.dp))
 
-                            // TELEMETRY TRIAD GAUGES (Frame Rate • Battery • Network/RAM)
+                            // Main-app telemetry excludes FPS; live game frame rate appears only in the edge panel.
                             TelemetryTriadHeader(
-                                fps = state.measuredFps,
-                                fpsFromRoblox = state.fpsFromRoblox,
                                 hw = state.hardwareProfile,
                                 accentColor = accentColor
                             )
@@ -587,15 +580,11 @@ private fun EdgeNavigationRailPill(
 
 @Composable
 private fun TelemetryTriadHeader(
-    fps: Int?,
-    fpsFromRoblox: Boolean,
     hw: DeviceHardwareProfile?,
     accentColor: Color
 ) {
-    val displayFps = fps?.toString() ?: "--"
     val batteryPct = hw?.batteryPercent?.toString() ?: "--"
-    val netLatencyMs = hw?.networkLatencyEstimateMs
-    val netMs = netLatencyMs?.let { String.format("%.1f", it) } ?: "--"
+    val netMs = hw?.networkLatencyEstimateMs?.let { String.format("%.1f", it) } ?: "--"
 
     Row(
         modifier = Modifier
@@ -604,13 +593,6 @@ private fun TelemetryTriadHeader(
         horizontalArrangement = Arrangement.spacedBy(8.dp),
         verticalAlignment = Alignment.CenterVertically
     ) {
-        CompactSideMetric(
-            title = if (fpsFromRoblox) "Frame rate" else "UI frame rate",
-            value = displayFps,
-            unit = "FPS",
-            accentColor = accentColor,
-            modifier = Modifier.weight(1f)
-        )
         CompactSideMetric(
             title = "Battery",
             value = batteryPct,
@@ -1147,7 +1129,7 @@ private fun GraphicsTechnologyContent(
             accentColor = accentColor
         ) {
             Text(
-                text = "• Measured Frame Latency: ${String.format("%.2f", bench.frameProcessingTimeMs)} ms/frame (~${bench.maxTheoreticalFps} fps ceiling)\n" +
+                text = "• Measured Frame Latency: ${String.format("%.2f", bench.frameProcessingTimeMs)} ms/frame\n" +
                     "• 2X Feasible: ${if (bench.canSustain2x) "Yes" else "Limited"} | 3X: ${if (bench.canSustain3x) "Yes" else "Limited"} | 4X: ${if (bench.canSustain4x) "Yes" else "Heavy"}\n" +
                     "• Pipeline Status: ${frameTelemetry.statusNote}",
                 color = Color(0xFFCFD6E0),

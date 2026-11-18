@@ -13,19 +13,12 @@ import android.opengl.EGLSurface
 import android.opengl.GLES20
 import android.os.BatteryManager
 import android.os.Build
-import android.os.Handler
-import android.os.Looper
 import android.os.PowerManager
 import android.os.SystemClock
-import android.view.Choreographer
 import android.view.WindowManager
 import com.akenterprises.auroraengine.core.model.DeviceHardwareProfile
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
-import kotlinx.coroutines.flow.MutableStateFlow
-import kotlinx.coroutines.flow.StateFlow
-import kotlinx.coroutines.flow.asStateFlow
-import java.util.ArrayDeque
 import java.io.File
 import java.net.InetSocketAddress
 import java.net.Socket
@@ -38,50 +31,8 @@ import java.net.Socket
  */
 class HardwareTelemetryMonitor(private val context: Context) {
 
-    private val mainHandler = Handler(Looper.getMainLooper())
-    private val frameTimesNs = ArrayDeque<Long>()
-    private val _measuredFrameRate = MutableStateFlow<Float?>(null)
-    val measuredFrameRate: StateFlow<Float?> = _measuredFrameRate.asStateFlow()
-    private var frameCallback: Choreographer.FrameCallback? = null
-    private var lastFpsUpdateNs = 0L
-
-    fun startFrameRateMonitoring() {
-        mainHandler.post {
-            if (frameCallback != null) return@post
-            frameTimesNs.clear()
-            lastFpsUpdateNs = 0L
-            val callback = object : Choreographer.FrameCallback {
-                override fun doFrame(frameTimeNanos: Long) {
-                    frameTimesNs.addLast(frameTimeNanos)
-                    val cutoff = frameTimeNanos - 1_000_000_000L
-                    while (frameTimesNs.size > 2 && frameTimesNs.first() < cutoff) {
-                        frameTimesNs.removeFirst()
-                    }
-                    if (frameTimeNanos - lastFpsUpdateNs >= 500_000_000L) {
-                        val first = frameTimesNs.firstOrNull()
-                        val span = first?.let { frameTimeNanos - it } ?: 0L
-                        _measuredFrameRate.value = if (span > 0L && frameTimesNs.size > 1) {
-                            (frameTimesNs.size - 1) * 1_000_000_000f / span
-                        } else {
-                            null
-                        }
-                        lastFpsUpdateNs = frameTimeNanos
-                    }
-                    Choreographer.getInstance().postFrameCallback(this)
-                }
-            }
-            frameCallback = callback
-            Choreographer.getInstance().postFrameCallback(callback)
-        }
-    }
-
-    fun stopFrameRateMonitoring() {
-        mainHandler.post {
-            frameCallback?.let(Choreographer.getInstance()::removeFrameCallback)
-            frameCallback = null
-            frameTimesNs.clear()
-            _measuredFrameRate.value = null
-        }
+    suspend fun sampleNetworkLatencyMs(): Float? = withContext(Dispatchers.IO) {
+        measureTcpLatencyMs()
     }
 
     private var cachedGlRenderer: String? = null

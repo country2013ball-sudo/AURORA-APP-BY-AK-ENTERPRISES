@@ -55,8 +55,6 @@ data class AuroraUiState(
     val isOverlayServiceActive: Boolean = false,
     val canWriteSystemSettings: Boolean = false,
     val systemApplyProgress: Float? = null,
-    val measuredFps: Int? = null,
-    val fpsFromRoblox: Boolean = false,
     val isControlShadeActive: Boolean = false
 )
 
@@ -112,14 +110,6 @@ class AuroraViewModel(application: Application) : AndroidViewModel(application) 
             }
         )
 
-        viewModelScope.launch {
-            telemetryMonitor.measuredFrameRate.collect { fps ->
-                _uiState.update {
-                    if (it.fpsFromRoblox) it else it.copy(measuredFps = fps?.toInt())
-                }
-            }
-        }
-
         viewModelScope.launch(Dispatchers.IO) {
             val bench = withContext(Dispatchers.Default) {
                 NativeFrameProcessor.runRealTimeCapabilityBenchmark()
@@ -152,11 +142,6 @@ class AuroraViewModel(application: Application) : AndroidViewModel(application) 
         val shizuku = shizukuConnectionManager.refreshStatus()
         val hw = telemetryMonitor.sampleDeviceProfile(includeNetworkPing = includePing)
         val roblox = robloxEngine.inspectRobloxStatus()
-        val gameFps = if (shizuku.canExecutePrivileged && roblox.isRunning) {
-            shizukuCommandEngine.sampleRobloxFrameRate()
-        } else {
-            null
-        }
         val canOverlay = Settings.canDrawOverlays(appContext)
         _uiState.update {
             it.copy(
@@ -166,9 +151,7 @@ class AuroraViewModel(application: Application) : AndroidViewModel(application) 
                 overlayPermissionGranted = canOverlay,
                 isOverlayServiceActive = EdgePanelOverlayService.isOverlayRunning,
                 isControlShadeActive = LiquidControlShadeService.isOverlayRunning,
-                canWriteSystemSettings = Settings.System.canWrite(appContext),
-                measuredFps = gameFps?.toInt() ?: telemetryMonitor.measuredFrameRate.value?.toInt(),
-                fpsFromRoblox = gameFps != null
+                canWriteSystemSettings = Settings.System.canWrite(appContext)
             )
         }
     }
@@ -216,10 +199,6 @@ class AuroraViewModel(application: Application) : AndroidViewModel(application) 
     fun selectTab(tab: EdgeTab) {
         _uiState.update { it.copy(selectedTab = tab) }
     }
-
-    fun startFrameRateMonitoring() = telemetryMonitor.startFrameRateMonitoring()
-
-    fun stopFrameRateMonitoring() = telemetryMonitor.stopFrameRateMonitoring()
 
     fun toggleEdgePanelExpanded() {
         _uiState.update { it.copy(isEdgePanelExpanded = !it.isEdgePanelExpanded) }
@@ -501,7 +480,6 @@ class AuroraViewModel(application: Application) : AndroidViewModel(application) 
 
     override fun onCleared() {
         shizukuConnectionManager.unregisterListeners()
-        telemetryMonitor.stopFrameRateMonitoring()
         telemetryJob?.cancel()
         super.onCleared()
     }

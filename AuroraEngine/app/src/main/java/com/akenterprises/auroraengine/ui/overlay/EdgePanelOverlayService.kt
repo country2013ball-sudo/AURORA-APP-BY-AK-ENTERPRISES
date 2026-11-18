@@ -8,13 +8,17 @@ import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
 import android.content.pm.ServiceInfo
+import android.graphics.Canvas
 import android.graphics.Color
+import android.graphics.Paint
 import android.graphics.PixelFormat
+import android.graphics.RectF
 import android.graphics.Typeface
 import android.graphics.drawable.GradientDrawable
 import android.os.BatteryManager
 import android.os.Build
 import android.os.IBinder
+import android.net.Uri
 import android.provider.Settings
 import android.util.Log
 import android.view.Gravity
@@ -22,25 +26,34 @@ import android.view.MotionEvent
 import android.view.View
 import android.view.WindowManager
 import android.widget.LinearLayout
+import android.widget.ScrollView
 import android.widget.TextView
+import android.widget.Toast
 import androidx.core.app.NotificationCompat
 import com.akenterprises.auroraengine.AuroraApplication
 import com.akenterprises.auroraengine.MainActivity
 import com.akenterprises.auroraengine.R
+import com.akenterprises.auroraengine.monitoring.HardwareTelemetryMonitor
 import com.akenterprises.auroraengine.core.model.PerformanceMode
 import com.akenterprises.auroraengine.core.model.AuroraVisualTheme
+import com.akenterprises.auroraengine.core.model.FrameGenMultiplier
+import com.akenterprises.auroraengine.core.model.LiquidFlowType
 import com.akenterprises.auroraengine.core.model.TouchProfile
-import com.akenterprises.auroraengine.core.model.UpscalingMode
 import com.akenterprises.auroraengine.core.prefs.AuroraPreferences
 import com.akenterprises.auroraengine.performance.PerformanceModeController
 import com.akenterprises.auroraengine.rammanager.SafeRamManager
+import com.akenterprises.auroraengine.roblox.RobloxOptimizationEngine
 import com.akenterprises.auroraengine.shizuku.ShizukuCommandEngine
 import com.akenterprises.auroraengine.shizuku.ShizukuConnectionManager
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import java.util.Locale
 
 /**
@@ -69,11 +82,14 @@ class EdgePanelOverlayService : Service() {
     private lateinit var shizukuCommandEngine: ShizukuCommandEngine
     private lateinit var performanceModeController: PerformanceModeController
     private lateinit var safeRamManager: SafeRamManager
+    private lateinit var robloxEngine: RobloxOptimizationEngine
+    private lateinit var telemetryMonitor: HardwareTelemetryMonitor
 
     private var windowManager: WindowManager? = null
     private var collapsedHandleView: View? = null
     private var expandedPanelView: View? = null
     private var isPanelExpanded = false
+    private var fpsSamplingJob: Job? = null
 
     override fun onCreate() {
         super.onCreate()
@@ -84,6 +100,13 @@ class EdgePanelOverlayService : Service() {
             prefs, shizukuConnectionManager, shizukuCommandEngine
         )
         safeRamManager = SafeRamManager(applicationContext, shizukuCommandEngine)
+        robloxEngine = RobloxOptimizationEngine(
+            applicationContext,
+            shizukuCommandEngine,
+            performanceModeController,
+            safeRamManager
+        )
+        telemetryMonitor = HardwareTelemetryMonitor(applicationContext)
     }
 
     override fun onBind(intent: Intent?): IBinder? = null
@@ -226,6 +249,8 @@ class EdgePanelOverlayService : Service() {
     }
 
     private fun removeExpandedPanel() {
+        fpsSamplingJob?.cancel()
+        fpsSamplingJob = null
         expandedPanelView?.let {
             try {
                 windowManager?.removeView(it)
@@ -246,7 +271,7 @@ class EdgePanelOverlayService : Service() {
 
         val wm = windowManager ?: return
         val params = WindowManager.LayoutParams(
-            dp(330),
+            dp(360),
             WindowManager.LayoutParams.WRAP_CONTENT,
             overlayLayoutType(),
             WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
@@ -266,7 +291,6 @@ class EdgePanelOverlayService : Service() {
         val batTempC = battery?.second?.let { String.format(Locale.US, "%.1f", it) } ?: "--"
         val shizukuOk = shizukuConnectionManager.refreshStatus().canExecutePrivileged
 
-        // Outer horizontal container: Left Mini Rail + Right Mini Card (matches 3372.jpg reference)
         val rootRow = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             setOnTouchListener { _, event ->
@@ -279,7 +303,6 @@ class EdgePanelOverlayService : Service() {
             }
         }
 
-        // 1. LEFT VERTICAL MINI RAIL PILL
         val leftRail = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             gravity = Gravity.CENTER_HORIZONTAL
@@ -293,9 +316,15 @@ class EdgePanelOverlayService : Service() {
         }
 
         val statusTextView = TextView(this).apply {
-            text = if (shizukuOk) "Shizuku ADB Active • In-Game Overlay" else "Shizuku Locked • Tap App to Authorize"
-            textSize = 10f
-            setTextColor(if (shizukuOk) Color.parseColor("#00E676") else Color.parseColor("#FF8A80"))
+            text = if (shizukuOk) "SHIZUKU READY" else "SHIZUKU LOCKED"
+            textSize = 9f
+            typeface = Typeface.DEFAULT_BOLD
+            setTextColor(if (shizukuOk) Color.WHITE else Color.parseColor("#EF4444"))
+            setOnClickListener {
+                startActivity(Intent(this@EdgePanelOverlayService, MainActivity::class.java).apply {
+                    addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_SINGLE_TOP)
+                })
+            }
         }
 
         fun addRailButton(symbol: String, label: String, active: Boolean, onClick: () -> Unit) {
@@ -327,38 +356,53 @@ class EdgePanelOverlayService : Service() {
             leftRail.addView(btn)
         }
 
-        addRailButton("((•))", "Boost", true) {
+        addRailButton("◉", "Performance", true) {
             serviceScope.launch {
                 val report = performanceModeController.applyMode(prefs.selectedMode)
                 statusTextView.text = report.summary
                 showExpandedInGameMiniPanel()
             }
         }
-        addRailButton("▤", "RAM Purge", false) {
-            serviceScope.launch {
-                val res = safeRamManager.performSafeMemoryOptimization(includeShizukuTrim = false)
-                statusTextView.text = "RAM Purged: +${res.reclaimedMb} MB (${res.afterAvailableMb} MB free)"
+        addRailButton("☷", "Tools", false) {
+            if (!Settings.canDrawOverlays(this)) {
+                Toast.makeText(this, "Allow display over other apps to open Controls.", Toast.LENGTH_SHORT).show()
+                startActivity(
+                    Intent(
+                        Settings.ACTION_MANAGE_OVERLAY_PERMISSION,
+                        Uri.parse("package:$packageName")
+                    ).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                )
+            } else {
+                val controlIntent = Intent(this, LiquidControlShadeService::class.java)
+                if (LiquidControlShadeService.isOverlayRunning) {
+                    stopService(controlIntent)
+                } else {
+                    startForegroundService(controlIntent)
+                }
             }
         }
-        addRailButton("⌂", "Full App", false) {
-            showCollapsedEdgeHandle()
-            val launch = Intent(this, MainActivity::class.java).apply {
+        addRailButton("AK", "Me", false) {
+            startActivity(Intent(this, MainActivity::class.java).apply {
                 addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_SINGLE_TOP)
-            }
-            startActivity(launch)
+            })
         }
-        addRailButton("✕", "Hide", false) {
-            showCollapsedEdgeHandle()
+        addRailButton("R", "Roblox", false) {
+            val launchIntent = packageManager.getLaunchIntentForPackage("com.roblox.client")
+            if (launchIntent == null) {
+                Toast.makeText(this, "Roblox is not installed.", Toast.LENGTH_SHORT).show()
+            } else {
+                launchIntent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                startActivity(launchIntent)
+            }
         }
 
         rootRow.addView(leftRail, LinearLayout.LayoutParams(dp(54), LinearLayout.LayoutParams.WRAP_CONTENT).apply {
             rightMargin = dp(8)
         })
 
-        // 2. RIGHT MAIN FLOATING MINI CARD
         val mainCard = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
-            setPadding(dp(14), dp(12), dp(14), dp(12))
+            setPadding(dp(12), dp(10), dp(12), dp(10))
             background = GradientDrawable().apply {
                 shape = GradientDrawable.RECTANGLE
                 cornerRadius = dp(22).toFloat()
@@ -366,21 +410,39 @@ class EdgePanelOverlayService : Service() {
                 setStroke(dp(1), accentInt)
             }
         }
+        val panelContent = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(0, 0, 0, dp(8))
+        }
+        val scrollView = ScrollView(this).apply {
+            isFillViewport = true
+            addView(panelContent)
+        }
+        val availableHeight = (resources.displayMetrics.heightPixels - dp(120)).coerceAtLeast(dp(360))
+        mainCard.addView(
+            scrollView,
+            LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT,
+                minOf(dp(620), availableHeight)
+            )
+        )
 
-        // Top Header Row
         val headerRow = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
         }
-        headerRow.addView(TextView(this).apply {
-            text = if (prefs.visualTheme == AuroraVisualTheme.OXYGEN_OS_16) {
-                "OP GAMING CORE"
-            } else {
-                "HYPERBOOST"
-            }
+        val themeButton = TextView(this).apply {
+            text = if (prefs.visualTheme == AuroraVisualTheme.OXYGEN_OS_16) "OP GAMING CORE" else "HYPERBOOST"
             textSize = 10.5f
             typeface = Typeface.DEFAULT_BOLD
             setTextColor(accentInt)
+            gravity = Gravity.CENTER
+            setPadding(dp(10), dp(7), dp(10), dp(7))
+            background = GradientDrawable().apply {
+                cornerRadius = dp(16).toFloat()
+                setColor(0x26121212)
+                setStroke(dp(1), accentInt)
+            }
             setOnClickListener {
                 prefs.visualTheme = if (prefs.visualTheme == AuroraVisualTheme.OXYGEN_OS_16) {
                     AuroraVisualTheme.COLOR_OS_17
@@ -389,30 +451,46 @@ class EdgePanelOverlayService : Service() {
                 }
                 showExpandedInGameMiniPanel()
             }
-        }, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f))
+        }
+        headerRow.addView(themeButton, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f))
 
-        headerRow.addView(TextView(this).apply {
-            text = "Collapse ✕"
+        val shizukuBadge = TextView(this).apply {
+            text = if (shizukuOk) "SHIZUKU READY" else "SHIZUKU LOCKED"
             textSize = 10f
-            setTextColor(Color.parseColor("#A0AAB8"))
+            typeface = Typeface.DEFAULT_BOLD
+            setTextColor(if (shizukuOk) Color.WHITE else Color.parseColor("#FF6B6B"))
+            setPadding(dp(6), dp(6), dp(6), dp(6))
+            setOnClickListener {
+                startActivity(Intent(this@EdgePanelOverlayService, MainActivity::class.java).apply {
+                    addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_SINGLE_TOP)
+                })
+            }
+        }
+        headerRow.addView(shizukuBadge, LinearLayout.LayoutParams(LinearLayout.LayoutParams.WRAP_CONTENT, LinearLayout.LayoutParams.WRAP_CONTENT))
+        headerRow.addView(TextView(this).apply {
+            text = "✕"
+            textSize = 14f
+            gravity = Gravity.CENTER
+            setTextColor(Color.WHITE)
+            setPadding(dp(8), dp(5), 0, dp(5))
             setOnClickListener { showCollapsedEdgeHandle() }
         })
-        mainCard.addView(headerRow)
+        panelContent.addView(headerRow)
 
-        // Unknown values remain blank until they can be measured by the active app.
         val triadRow = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER
-            setPadding(0, dp(10), 0, dp(10))
+            setPadding(0, dp(10), 0, dp(8))
         }
 
         fun buildMetricBox(title: String, bigVal: String, subVal: String): View {
             return LinearLayout(this).apply {
                 orientation = LinearLayout.VERTICAL
                 gravity = Gravity.CENTER
+                setPadding(dp(2), dp(4), dp(2), dp(4))
                 addView(TextView(context).apply {
                     text = title
-                    textSize = 9.5f
+                    textSize = 9f
                     setTextColor(Color.parseColor("#9AA4B2"))
                 })
                 addView(TextView(context).apply {
@@ -429,13 +507,22 @@ class EdgePanelOverlayService : Service() {
             }
         }
 
-        triadRow.addView(buildMetricBox("Frame rate", "--", "FPS"), LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f))
+        val fpsGauge = ArcMetricView(this, accentInt, "Frame rate", "FPS")
+        val networkGauge = ArcMetricView(this, accentInt, "Network", "ms")
+        triadRow.addView(fpsGauge, LinearLayout.LayoutParams(0, dp(88), 1f))
         val batteryLabel = if (batPct == "--") "--" else "$batPct%"
         triadRow.addView(buildMetricBox("Battery", batteryLabel, "${batTempC}°C"), LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f))
-        triadRow.addView(buildMetricBox("Network", "--", "ms"), LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f))
-        mainCard.addView(triadRow)
+        triadRow.addView(networkGauge, LinearLayout.LayoutParams(0, dp(88), 1f))
+        panelContent.addView(triadRow)
+        val fpsStatusView = TextView(this).apply {
+            text = "Live Roblox FPS requires Shizuku and a running game."
+            textSize = 9f
+            gravity = Gravity.CENTER
+            setTextColor(Color.parseColor("#9AA4B2"))
+            setPadding(0, 0, 0, dp(6))
+        }
+        panelContent.addView(fpsStatusView)
 
-        // 3-Mode Selector Pill Row (Power-saving | Balanced | Pro Gamer)
         val modeRow = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             setPadding(dp(3), dp(3), dp(3), dp(3))
@@ -458,11 +545,7 @@ class EdgePanelOverlayService : Service() {
                 gravity = Gravity.CENTER
                 typeface = if (selected) Typeface.DEFAULT_BOLD else Typeface.DEFAULT
                 setPadding(dp(4), dp(7), dp(4), dp(7))
-                setTextColor(
-                    if (selected && prefs.visualTheme == AuroraVisualTheme.OXYGEN_OS_16) Color.parseColor("#090A0F")
-                    else if (selected) Color.WHITE
-                    else Color.parseColor("#A0AAB8")
-                )
+                setTextColor(if (selected) Color.WHITE else Color.parseColor("#A0AAB8"))
                 if (selected) {
                     background = GradientDrawable().apply {
                         cornerRadius = dp(15).toFloat()
@@ -473,93 +556,225 @@ class EdgePanelOverlayService : Service() {
                     serviceScope.launch {
                         val rep = performanceModeController.applyMode(modeItem)
                         statusTextView.text = rep.summary
-                        showExpandedInGameMiniPanel() // Re-render accent instantly
+                        showExpandedInGameMiniPanel()
                     }
                 }
             }
             modeRow.addView(pill, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f))
         }
-        mainCard.addView(modeRow)
+        panelContent.addView(modeRow)
 
-        // Touch Response & Hardware Scaling Row
-        val touchHeader = TextView(this).apply {
-            text = "Touch & Hardware Scaling"
-            textSize = 10.5f
+        fun addSectionTitle(title: String, subtitle: String? = null) {
+            panelContent.addView(TextView(this).apply {
+                text = title
+                textSize = 11f
+                typeface = Typeface.DEFAULT_BOLD
+                setTextColor(Color.WHITE)
+                setPadding(0, dp(10), 0, dp(3))
+            })
+            if (subtitle != null) {
+                panelContent.addView(TextView(this).apply {
+                    text = subtitle
+                    textSize = 9f
+                    setTextColor(Color.parseColor("#9AA4B2"))
+                    setPadding(0, 0, 0, dp(5))
+                })
+            }
+        }
+
+        fun addChoiceRow(
+            labels: List<String>,
+            selectedLabel: String?,
+            enabledLabels: Set<String> = labels.toSet(),
+            onSelected: (String) -> Unit
+        ) {
+            val row = LinearLayout(this).apply {
+                orientation = LinearLayout.HORIZONTAL
+            }
+            labels.forEachIndexed { index, label ->
+                val enabled = label in enabledLabels
+                val selected = label == selectedLabel
+                val choice = TextView(this).apply {
+                    text = label
+                    textSize = 9.5f
+                    gravity = Gravity.CENTER
+                    typeface = if (selected) Typeface.DEFAULT_BOLD else Typeface.DEFAULT
+                    setPadding(dp(4), dp(8), dp(4), dp(8))
+                    setTextColor(
+                        when {
+                            !enabled -> Color.parseColor("#5A6270")
+                            selected -> Color.WHITE
+                            else -> Color.parseColor("#D0D7E2")
+                        }
+                    )
+                    background = GradientDrawable().apply {
+                        cornerRadius = dp(10).toFloat()
+                        setColor(if (selected) accentInt else Color.parseColor("#1B1E28"))
+                        setStroke(
+                            dp(1),
+                            if (selected) accentInt else Color.parseColor("#2A2E3D")
+                        )
+                    }
+                    isEnabled = enabled
+                    setOnClickListener { onSelected(label) }
+                }
+                row.addView(
+                    choice,
+                    LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f).apply {
+                        if (index < labels.lastIndex) rightMargin = dp(5)
+                    }
+                )
+            }
+            panelContent.addView(row)
+        }
+
+        addSectionTitle(
+            "Touch response",
+            "May increase device power consumption and temperature."
+        )
+        addChoiceRow(
+            labels = listOf("Standard", "Ultra touch"),
+            selectedLabel = if (prefs.touchProfile == TouchProfile.STANDARD) "Standard" else "Ultra touch"
+        ) { label ->
+            val touchProfile = if (label == "Standard") TouchProfile.STANDARD else TouchProfile.ULTRA_TOUCH
+            prefs.touchProfile = touchProfile
+            serviceScope.launch {
+                val report = performanceModeController.applyMode(prefs.selectedMode, touchProfile)
+                statusTextView.text = report.summary
+                showExpandedInGameMiniPanel()
+            }
+        }
+
+        addSectionTitle("Liquid Flow Engine")
+        addChoiceRow(
+            labels = listOf("Fluid Motion", "Fluid Fusion"),
+            selectedLabel = prefs.liquidFlowType.label
+        ) { label ->
+            prefs.liquidFlowType = if (label == "Fluid Motion") {
+                LiquidFlowType.FLUID_MOTION
+            } else {
+                LiquidFlowType.FLUID_FUSION
+            }
+            showExpandedInGameMiniPanel()
+        }
+
+        addSectionTitle("Screen refresh rate")
+        val supportedRates = supportedRefreshRatesHz()
+        val supportedRateLabels = supportedRates
+            .filter { it in listOf(60f, 90f, 120f) }
+            .map { "${it.toInt()} Hz" }
+            .toSet()
+        addChoiceRow(
+            labels = listOf("60 Hz", "90 Hz", "120 Hz"),
+            selectedLabel = prefs.targetRefreshRateHz.takeIf { it in supportedRates }?.let { "${it.toInt()} Hz" },
+            enabledLabels = supportedRateLabels
+        ) { label ->
+            val refreshRate = label.removeSuffix(" Hz").toFloat()
+            prefs.targetRefreshRateHz = refreshRate
+            serviceScope.launch {
+                val report = performanceModeController.applyMode(
+                    prefs.selectedMode,
+                    prefs.touchProfile,
+                    supportedRates,
+                    refreshRate
+                )
+                statusTextView.text = report.summary
+                showExpandedInGameMiniPanel()
+            }
+        }
+
+        addSectionTitle("Aurora Frame Generation", "Capture analysis does not replace Roblox frames.")
+        addChoiceRow(
+            labels = listOf("OFF", "2X", "3X"),
+            selectedLabel = prefs.frameGenMultiplier.label
+        ) { label ->
+            val multiplier = when (label) {
+                "2X" -> FrameGenMultiplier.X2
+                "3X" -> FrameGenMultiplier.X3
+                else -> FrameGenMultiplier.OFF
+            }
+            prefs.frameGenMultiplier = multiplier
+            serviceScope.launch {
+                val report = if (multiplier == FrameGenMultiplier.OFF) {
+                    performanceModeController.applyMode(prefs.selectedMode)
+                } else {
+                    performanceModeController.applyFramePacing(multiplier)
+                }
+                statusTextView.text = report?.summary ?: "Frame pacing is turned off."
+                showExpandedInGameMiniPanel()
+            }
+        }
+
+        val applyButton = TextView(this).apply {
+            text = "CHANGE / APPLY (2-3s)"
+            textSize = 10f
+            gravity = Gravity.CENTER
             typeface = Typeface.DEFAULT_BOLD
             setTextColor(Color.WHITE)
-            setPadding(0, dp(10), 0, dp(4))
-        }
-        mainCard.addView(touchHeader)
-
-        val quickActionRow = LinearLayout(this).apply {
-            orientation = LinearLayout.HORIZONTAL
-        }
-
-        val isUltraTouch = prefs.touchProfile == TouchProfile.ULTRA_TOUCH
-        val touchBtn = TextView(this).apply {
-            text = if (isUltraTouch) "Touch: Ultra ✓" else "Touch: Standard"
-            textSize = 10f
-            gravity = Gravity.CENTER
-            typeface = Typeface.DEFAULT_BOLD
-            setPadding(dp(6), dp(8), dp(6), dp(8))
-            setTextColor(if (isUltraTouch) accentInt else Color.parseColor("#D0D7E2"))
+            setPadding(dp(8), dp(10), dp(8), dp(10))
             background = GradientDrawable().apply {
-                cornerRadius = dp(10).toFloat()
-                setColor(Color.parseColor("#1B1E28"))
-                setStroke(dp(1), if (isUltraTouch) accentInt else Color.parseColor("#2A2E3D"))
+                cornerRadius = dp(12).toFloat()
+                setColor(accentInt)
             }
             setOnClickListener {
-                val next = if (isUltraTouch) TouchProfile.STANDARD else TouchProfile.ULTRA_TOUCH
-                prefs.touchProfile = next
+                isEnabled = false
+                text = "APPLYING..."
                 serviceScope.launch {
-                    performanceModeController.applyMode(prefs.selectedMode, next)
-                    showExpandedInGameMiniPanel()
+                    delay(2_500L)
+                    val targetRefreshRate = prefs.targetRefreshRateHz
+                        .takeIf { it in supportedRates }
+                    val report = performanceModeController.applyMode(
+                        prefs.selectedMode,
+                        prefs.touchProfile,
+                        supportedRates,
+                        targetRefreshRate
+                    )
+                    statusTextView.text = report.summary
+                    isEnabled = true
+                    text = "CHANGE / APPLY (2-3s)"
                 }
             }
         }
-
-        val isHwScaleActive = prefs.upscalingMode != UpscalingMode.NATIVE
-        val hwScaleLabel = if (isHwScaleActive) {
-            when (prefs.upscalingMode) {
-                UpscalingMode.EXPERIMENTAL_AI -> "HW Scale: 0.75x ✓"
-                UpscalingMode.SUPPORTED_CAS -> "HW Scale: mode-dependent ✓"
-                else -> "HW Scale: active ✓"
-            }
-        } else {
-            "HW Scale: 100%"
-        }
-        val scaleBtn = TextView(this).apply {
-            text = hwScaleLabel
-            textSize = 10f
-            gravity = Gravity.CENTER
-            typeface = Typeface.DEFAULT_BOLD
-            setPadding(dp(6), dp(8), dp(6), dp(8))
-            setTextColor(if (isHwScaleActive) accentInt else Color.parseColor("#D0D7E2"))
-            background = GradientDrawable().apply {
-                cornerRadius = dp(10).toFloat()
-                setColor(Color.parseColor("#1B1E28"))
-                setStroke(dp(1), if (isHwScaleActive) accentInt else Color.parseColor("#2A2E3D"))
-            }
-            setOnClickListener {
-                val nextScale = if (isHwScaleActive) UpscalingMode.NATIVE else UpscalingMode.EXPERIMENTAL_AI
-                prefs.upscalingMode = nextScale
-                serviceScope.launch {
-                    val rep = performanceModeController.applyMode(prefs.selectedMode)
-                    statusTextView.text = rep.summary
-                    showExpandedInGameMiniPanel()
-                }
-            }
-        }
-
-        quickActionRow.addView(touchBtn, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f).apply {
-            rightMargin = dp(6)
+        panelContent.addView(applyButton, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT).apply {
+            topMargin = dp(8)
         })
-        quickActionRow.addView(scaleBtn, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f))
-        mainCard.addView(quickActionRow)
 
-        // Status Footer inside Mini Card
+        val startGamingButton = TextView(this).apply {
+            text = "START GAMING"
+            textSize = 11f
+            gravity = Gravity.CENTER
+            typeface = Typeface.DEFAULT_BOLD
+            setTextColor(Color.WHITE)
+            setPadding(dp(8), dp(10), dp(8), dp(10))
+            background = GradientDrawable().apply {
+                cornerRadius = dp(12).toFloat()
+                setColor(accentInt)
+            }
+            setOnClickListener {
+                val launchIntent = packageManager.getLaunchIntentForPackage("com.roblox.client")
+                if (launchIntent == null) {
+                    statusTextView.text = "Roblox is not installed."
+                } else {
+                    serviceScope.launch {
+                        val report = performanceModeController.applyMode(
+                            prefs.selectedMode,
+                            prefs.touchProfile,
+                            supportedRates,
+                            prefs.targetRefreshRateHz.takeIf { it in supportedRates }
+                        )
+                        statusTextView.text = report.summary
+                        launchIntent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                        startActivity(launchIntent)
+                    }
+                }
+            }
+        }
+        panelContent.addView(startGamingButton, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT).apply {
+            topMargin = dp(6)
+        })
+
         statusTextView.setPadding(0, dp(8), 0, 0)
-        mainCard.addView(statusTextView)
+        panelContent.addView(statusTextView)
 
         rootRow.addView(mainCard, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f))
 
@@ -567,6 +782,7 @@ class EdgePanelOverlayService : Service() {
         isPanelExpanded = true
         try {
             wm.addView(rootRow, params)
+            startRealtimeFpsSampling(fpsGauge, networkGauge, fpsStatusView)
         } catch (e: WindowManager.BadTokenException) {
             Log.e(TAG, "Could not attach the expanded panel.", e)
             showCollapsedEdgeHandle()
@@ -584,6 +800,70 @@ class EdgePanelOverlayService : Service() {
         if (level < 0 || scale <= 0 || temp < 0) return null
         return ((level * 100) / scale) to (temp / 10f)
     }
+
+    @Suppress("DEPRECATION")
+    private fun supportedRefreshRatesHz(): List<Float> {
+        val wm = getSystemService(Context.WINDOW_SERVICE) as WindowManager
+        return wm.defaultDisplay.supportedModes
+            .map { it.refreshRate }
+            .distinct()
+            .sorted()
+    }
+
+    private fun startRealtimeFpsSampling(
+        fpsGauge: ArcMetricView,
+        networkGauge: ArcMetricView,
+        statusView: TextView
+    ) {
+        fpsSamplingJob?.cancel()
+        val panel = expandedPanelView ?: return
+        fpsSamplingJob = serviceScope.launch {
+            var sampleCount = 0
+            var lastNetworkLatencyMs: Float? = null
+            while (isActive && expandedPanelView === panel) {
+                val sample = withContext(Dispatchers.IO) {
+                    val networkLatencyMs = if (sampleCount % 4 == 0) {
+                        telemetryMonitor.sampleNetworkLatencyMs()
+                    } else {
+                        null
+                    }
+                    if (!shizukuConnectionManager.refreshStatus().canExecutePrivileged) {
+                        FpsSamplingResult(false, false, null, networkLatencyMs)
+                    } else {
+                        val robloxRunning = robloxEngine.inspectRobloxStatus().isRunning
+                        val fps = if (robloxRunning) shizukuCommandEngine.sampleRobloxFrameRate() else null
+                        FpsSamplingResult(true, robloxRunning, fps, networkLatencyMs)
+                    }
+                }
+                if (sampleCount % 4 == 0) {
+                    lastNetworkLatencyMs = sample.networkLatencyMs
+                }
+                fpsGauge.setMetric(
+                    value = sample.fps?.toInt()?.toString() ?: "--",
+                    progress = sample.fps?.div(240f)
+                )
+                networkGauge.setMetric(
+                    value = lastNetworkLatencyMs?.let { String.format(Locale.US, "%.0f", it) } ?: "--",
+                    progress = lastNetworkLatencyMs?.let { 1f - it / 120f }
+                )
+                statusView.text = when {
+                    !sample.authorized -> "Authorize Shizuku to read live Roblox FPS."
+                    !sample.robloxRunning -> "Open Roblox to display live FPS."
+                    sample.fps == null -> "Roblox FPS is currently unavailable."
+                    else -> "Live Roblox frame rate"
+                }
+                sampleCount += 1
+                delay(1_000L)
+            }
+        }
+    }
+
+    private data class FpsSamplingResult(
+        val authorized: Boolean,
+        val robloxRunning: Boolean,
+        val fps: Float?,
+        val networkLatencyMs: Float?
+    )
 
     override fun onDestroy() {
         isOverlayRunning = false
@@ -608,5 +888,66 @@ class EdgePanelOverlayService : Service() {
             .setOngoing(true)
             .setPriority(NotificationCompat.PRIORITY_LOW)
             .build()
+    }
+}
+
+private class ArcMetricView(
+    context: Context,
+    private val accentColor: Int,
+    private val title: String,
+    private val unit: String
+) : View(context) {
+    private val density = resources.displayMetrics.density
+    private val arcPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        style = Paint.Style.STROKE
+        strokeCap = Paint.Cap.ROUND
+        strokeWidth = 5f * density
+    }
+    private val labelPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        color = Color.parseColor("#A0AAB8")
+        textAlign = Paint.Align.CENTER
+        textSize = 9f * density
+    }
+    private val valuePaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        color = Color.WHITE
+        textAlign = Paint.Align.CENTER
+        textSize = 19f * density
+        typeface = Typeface.DEFAULT_BOLD
+    }
+    private val unitPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        color = accentColor
+        textAlign = Paint.Align.CENTER
+        textSize = 8f * density
+        typeface = Typeface.DEFAULT_BOLD
+    }
+
+    private var metricValue = "--"
+    private var progress: Float? = null
+
+    fun setMetric(value: String, progress: Float?) {
+        metricValue = value
+        this.progress = progress?.coerceIn(0f, 1f)
+        invalidate()
+    }
+
+    override fun onDraw(canvas: Canvas) {
+        super.onDraw(canvas)
+        val stroke = arcPaint.strokeWidth
+        val inset = stroke / 2f + 2f * density
+        val bounds = RectF(inset, inset, width - inset, height - inset)
+        val centerX = width / 2f
+        val centerY = height / 2f
+
+        arcPaint.color = Color.parseColor("#34343D")
+        canvas.drawArc(bounds, 135f, 270f, false, arcPaint)
+
+        progress?.let {
+            arcPaint.color = accentColor
+            canvas.drawArc(bounds, 135f, 270f * it, false, arcPaint)
+        }
+
+        canvas.drawText(title, centerX, centerY - 12f * density, labelPaint)
+        canvas.drawText(metricValue, centerX, centerY + 6f * density, valuePaint)
+        canvas.drawText(unit, centerX, centerY + 20f * density, unitPaint)
     }
 }

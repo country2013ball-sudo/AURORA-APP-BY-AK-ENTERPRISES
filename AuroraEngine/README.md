@@ -25,7 +25,7 @@ Aurora Engine is an Android companion app for configuring supported device setti
 - **Performance controls:** Power-saving, Balanced, and Pro Gamer profiles, plus supported refresh-rate and touch-response selections.
 - **Shizuku integration:** User-authorized privileged commands for supported system changes and Roblox session optimization.
 - **Safe memory tools:** Displays memory telemetry and uses the existing guarded cleanup path rather than indiscriminately killing apps.
-- **Live telemetry:** Battery, network estimates, and measured frame-rate data. Roblox frame statistics require Shizuku and a running game; otherwise the app reports its own UI frame rate.
+- **Live telemetry:** Battery and network estimates in the edge panel, plus Roblox frame statistics there when Shizuku is authorized and Roblox is running. FPS is not shown in the main app and is not fabricated when unavailable.
 - **Graphics utilities:** Native Contrast-Adaptive Sharpening and an optional MediaProjection capture-analysis prototype. Capture analysis does not replace Roblox's rendered output or promise higher game FPS.
 - **App-owned overlays:** Optional floating controls and a liquid-style controls panel. These do not replace Android's notification shade.
 - **Interface and branding:** AURORA ENGINE branding, a red-and-white main interface, and Fluid Motion / Fluid Fusion UI animation choices.
@@ -77,7 +77,7 @@ On unrooted 4 GB RAM phones running Android 14+, two platform constraints can af
 2. **Android Phantom Process Killer (`SIGKILL 9`):** Android limits background child processes and RAM consumption for terminal apps.
 
 ### Phone-Only Cloud Build Alternative (GitHub Codespaces / GitHub Actions — Zero PC Required)
-If Android's Phantom Process Killer interrupts heavy compilation on your 4 GB RAM phone, the repository workflow (`.github/workflows/build-aurora-apk.yml`) builds APKs on pushes to `main`/`master`, pull requests to those branches, or when started manually:
+If Android's Phantom Process Killer interrupts heavy compilation on your 4 GB RAM phone, the repository workflow (`.github/workflows/build-aurora-apk.yml`) builds APKs on pushes to `main`/`master`, pull requests to those branches, or when started manually. Tag a commit as `v*` to build a release APK and attach it to a GitHub Release with `.github/workflows/publish-aurora-release.yml`:
 1. Push this project to a GitHub repository where you can run Actions, or use the existing repository if you already have access.
 2. Open the **Actions** tab on GitHub (or open the repository in **GitHub Codespaces** in your mobile browser and run `./gradlew assembleDebug`).
 3. Open the completed workflow run, download the `aurora-engine-debug-apk` artifact, extract `app-debug.apk`, and tap it to install. The run also provides an `aurora-engine-release-apk` artifact.
