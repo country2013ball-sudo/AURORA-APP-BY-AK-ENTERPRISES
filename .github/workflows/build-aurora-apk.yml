@@ -1,12 +1,17 @@
-name: Build Aurora Engine v2 Smooth APK
+name: Build and upload Aurora Engine APKs
 
 on:
   push:
     branches: ["main", "master"]
+  pull_request:
+    branches: ["main", "master"]
   workflow_dispatch:
 
+permissions:
+  contents: read
+
 jobs:
-  build-apks:
+  build:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout source
@@ -31,20 +36,22 @@ jobs:
         with:
           gradle-version: "8.5"
 
-      - name: Build optimized release and debug APKs
+      - name: Build release and debug APKs
         working-directory: AuroraEngine
-        run: gradle assembleRelease assembleDebug --stacktrace
+        run: gradle assembleRelease assembleDebug --no-daemon --stacktrace
 
-      - name: Upload R8-optimized release APK
+      - name: Upload release APK artifact
         uses: actions/upload-artifact@v4
         with:
-          name: aurora-engine-v2-smooth-release-apk
+          name: aurora-engine-release-apk
           path: AuroraEngine/app/build/outputs/apk/release/app-release.apk
           if-no-files-found: error
+          retention-days: 14
 
-      - name: Upload debug APK
+      - name: Upload debug APK artifact
         uses: actions/upload-artifact@v4
         with:
-          name: aurora-engine-v2-debug-apk
+          name: aurora-engine-debug-apk
           path: AuroraEngine/app/build/outputs/apk/debug/app-debug.apk
           if-no-files-found: error
+          retention-days: 14

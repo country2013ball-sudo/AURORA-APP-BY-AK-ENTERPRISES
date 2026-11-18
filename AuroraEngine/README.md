@@ -1,4 +1,4 @@
-# Aurora Engine by AK Enterprises — Termux Build & Installation Guide
+# AURORA ENGINE — Termux Build & Installation Guide
 
 ## Desktop / GitHub Codespaces Build
 
@@ -12,11 +12,29 @@ The optimized, debug-signed release APK is `app/build/outputs/apk/release/app-re
 The debug APK is `app/build/outputs/apk/debug/app-debug.apk`. The release APK is for
 direct testing and is not signed for Play Store publishing.
 
-**Application Name:** Aurora Engine  
-**Developer Branding:** AK Enterprises  
-**Package ID:** `com.akenterprises.auroraengine`  
-**Primary Gaming Target:** Roblox (`com.roblox.client`)  
-**Reference Hardware Profile:** Samsung Galaxy A07 5G (4 GB RAM, ARM Mali-G57 GPU, Android)
+- **Application name:** AURORA ENGINE
+- **Developer:** AK by AK Enterprises
+- **Package ID:** `com.akenterprises.auroraengine`
+- **Primary gaming target:** Roblox (`com.roblox.client`)
+- **Reference hardware profile:** Samsung Galaxy A07 5G (4 GB RAM, ARM Mali-G57 GPU, Android)
+
+## What the App Contains
+
+Aurora Engine is an Android companion app for configuring supported device settings and monitoring a Roblox gaming session. It does not modify Roblox files or inject code into the game.
+
+- **Performance controls:** Power-saving, Balanced, and Pro Gamer profiles, plus supported refresh-rate and touch-response selections.
+- **Shizuku integration:** User-authorized privileged commands for supported system changes and Roblox session optimization.
+- **Safe memory tools:** Displays memory telemetry and uses the existing guarded cleanup path rather than indiscriminately killing apps.
+- **Live telemetry:** Battery, network estimates, and measured frame-rate data. Roblox frame statistics require Shizuku and a running game; otherwise the app reports its own UI frame rate.
+- **Graphics utilities:** Native Contrast-Adaptive Sharpening and an optional MediaProjection capture-analysis prototype. Capture analysis does not replace Roblox's rendered output or promise higher game FPS.
+- **App-owned overlays:** Optional floating controls and a liquid-style controls panel. These do not replace Android's notification shade.
+- **Interface and branding:** AURORA ENGINE branding, a red-and-white main interface, and Fluid Motion / Fluid Fusion UI animation choices.
+
+Some features require explicit Android permissions, Shizuku authorization, compatible hardware, or user approval for screen capture. System options are limited by the device and Android version.
+
+## Target Game
+
+The primary supported target is **Roblox for Android**, package `com.roblox.client`. Aurora Engine is designed to launch and optimize Roblox sessions using supported Android APIs; it does not change the game's code, assets, or rendering pipeline.
 
 ## 1. Quick-Start Phone-Only Workflow (No Nano Required)
 
@@ -59,15 +77,15 @@ On unrooted 4 GB RAM phones running Android 14+, two platform constraints can af
 2. **Android Phantom Process Killer (`SIGKILL 9`):** Android limits background child processes and RAM consumption for terminal apps.
 
 ### Phone-Only Cloud Build Alternative (GitHub Codespaces / GitHub Actions — Zero PC Required)
-If Android's Phantom Process Killer interrupts heavy compilation on your 4 GB RAM phone, `aurora_engine.zip` includes a ready-to-run GitHub Actions workflow (`.github/workflows/build-aurora-apk.yml`):
-1. Open Chrome on your phone and upload the extracted `AuroraEngine` project to a GitHub repository under your account (`mardhaakshith2013-byte`).
+If Android's Phantom Process Killer interrupts heavy compilation on your 4 GB RAM phone, the repository workflow (`.github/workflows/build-aurora-apk.yml`) builds APKs on pushes to `main`/`master`, pull requests to those branches, or when started manually:
+1. Push this project to a GitHub repository where you can run Actions, or use the existing repository if you already have access.
 2. Open the **Actions** tab on GitHub (or open the repository in **GitHub Codespaces** in your mobile browser and run `./gradlew assembleDebug`).
-3. Download the compiled `aurora-engine-debug-apk` artifact (`app-debug.apk`) directly to your phone and tap to install.
+3. Open the completed workflow run, download the `aurora-engine-debug-apk` artifact, extract `app-debug.apk`, and tap it to install. The run also provides an `aurora-engine-release-apk` artifact.
 
 ## 4. Connecting Shizuku & Optimizing Roblox After Installation
 
 1. Install and open **Shizuku** (`moe.shizuku.privileged.api`) on your phone.
 2. Start the Shizuku service using **Wireless Debugging** (Developer Options → Wireless Debugging → Pair device with pairing code in Shizuku).
-3. Open **Aurora Engine** by AK Enterprises.
+3. Open **AURORA ENGINE** (AK by AK Enterprises).
 4. If Shizuku is not yet authorized, Aurora Engine displays the **Mandatory Shizuku Authorization** banner. Tap **Authorize** and approve the official Shizuku prompt.
 5. Select your desired mode from the Edge Panel pill bar (**Power-saving / Battery**, **Balanced**, or **Pro Gamer / Performance**), choose **Standard** or **Ultra touch**, and tap **START GAMING** to optimize and launch Roblox (`com.roblox.client`).
