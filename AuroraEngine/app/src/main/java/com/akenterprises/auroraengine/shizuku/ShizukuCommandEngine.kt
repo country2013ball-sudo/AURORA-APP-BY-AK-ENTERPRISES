@@ -9,9 +9,9 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.withContext
 import rikka.shizuku.Shizuku
-import java.io.BufferedReader
 import java.io.InputStreamReader
 import java.util.Locale
+import java.util.concurrent.CompletableFuture
 import java.util.concurrent.TimeUnit
 
 /**
@@ -55,7 +55,7 @@ class ShizukuCommandEngine(
             requiredPermission = "Shizuku ADB Shell (UID 2000)",
             minSdk = 26,
             commandBuilder = { scale -> listOf("settings", "put", "global", "window_animation_scale", scale) },
-            argumentValidator = { scale -> scale in setOf("0.0", "0.5", "0.75", "1.0") },
+            argumentValidator = { scale -> scale in setOf("0.0", "0.5", "0.7", "0.75", "0.85", "1.0") },
             rollbackCommandStr = "settings put global window_animation_scale 1.0"
         ),
         "transition_anim_scale" to WhitelistedSpec(
@@ -65,7 +65,7 @@ class ShizukuCommandEngine(
             requiredPermission = "Shizuku ADB Shell (UID 2000)",
             minSdk = 26,
             commandBuilder = { scale -> listOf("settings", "put", "global", "transition_animation_scale", scale) },
-            argumentValidator = { scale -> scale in setOf("0.0", "0.5", "0.75", "1.0") },
+            argumentValidator = { scale -> scale in setOf("0.0", "0.5", "0.7", "0.75", "0.85", "1.0") },
             rollbackCommandStr = "settings put global transition_animation_scale 1.0"
         ),
         "animator_duration_scale" to WhitelistedSpec(
@@ -75,7 +75,7 @@ class ShizukuCommandEngine(
             requiredPermission = "Shizuku ADB Shell (UID 2000)",
             minSdk = 26,
             commandBuilder = { scale -> listOf("settings", "put", "global", "animator_duration_scale", scale) },
-            argumentValidator = { scale -> scale in setOf("0.0", "0.5", "0.75", "1.0") },
+            argumentValidator = { scale -> scale in setOf("0.0", "0.5", "0.7", "0.75", "0.85", "1.0") },
             rollbackCommandStr = "settings put global animator_duration_scale 1.0"
         ),
         "peak_refresh_rate" to WhitelistedSpec(
@@ -293,6 +293,17 @@ class ShizukuCommandEngine(
         record
     }
 
+    suspend fun sampleRobloxFrameRate(): Float? = withContext(Dispatchers.IO) {
+        if (!connectionManager.refreshStatus().canExecutePrivileged) return@withContext null
+        val result = runShizukuProcess(
+            listOf("/system/bin/dumpsys", "gfxinfo", "com.roblox.client", "framestats"),
+            timeoutSec = 3L,
+            maxOutputChars = 80_000
+        )
+        if (result.first != 0) return@withContext null
+        parseGfxinfoFrameRate(result.second)
+    }
+
     suspend fun rollbackAllReversibleChanges(): List<CommandExecutionRecord> = withContext(Dispatchers.IO) {
         val status = connectionManager.refreshStatus()
         if (!status.canExecutePrivileged) {
@@ -347,7 +358,11 @@ class ShizukuCommandEngine(
         listOf(rec)
     }
 
-    private fun runShizukuProcess(tokens: List<String>, timeoutSec: Long): Triple<Int, String, String> {
+    private fun runShizukuProcess(
+        tokens: List<String>,
+        timeoutSec: Long,
+        maxOutputChars: Int = 600
+    ): Triple<Int, String, String> {
         return try {
             val method = Shizuku::class.java.getDeclaredMethod(
                 "newProcess",
@@ -357,19 +372,51 @@ class ShizukuCommandEngine(
             )
             method.isAccessible = true
             val process = method.invoke(null, tokens.toTypedArray(), null, null) as Process
+            val stdoutFuture = CompletableFuture.supplyAsync {
+                readBoundedStream(process.inputStream, maxOutputChars, keepLast = maxOutputChars > 600)
+            }
+            val stderrFuture = CompletableFuture.supplyAsync {
+                readBoundedStream(process.errorStream, 600, keepLast = false)
+            }
 
             val finished = process.waitFor(timeoutSec, TimeUnit.SECONDS)
             if (!finished) {
                 process.destroyForcibly()
+                stdoutFuture.cancel(true)
+                stderrFuture.cancel(true)
                 return Triple(-1, "", "Command timed out after ${timeoutSec}s")
             }
 
-            val stdout = BufferedReader(InputStreamReader(process.inputStream)).use { it.readText().trim() }
-            val stderr = BufferedReader(InputStreamReader(process.errorStream)).use { it.readText().trim() }
-            Triple(process.exitValue(), stdout.take(600), stderr.take(600))
+            val stdout = stdoutFuture.get(1L, TimeUnit.SECONDS).trim()
+            val stderr = stderrFuture.get(1L, TimeUnit.SECONDS).trim()
+            Triple(process.exitValue(), stdout, stderr)
         } catch (t: Throwable) {
             Triple(-1, "", "Shizuku execution error: ${t.javaClass.simpleName}: ${t.message}")
         }
+    }
+
+    private fun readBoundedStream(
+        stream: java.io.InputStream,
+        maxChars: Int,
+        keepLast: Boolean
+    ): String {
+        val result = StringBuilder(maxChars.coerceAtMost(4096))
+        val buffer = CharArray(2048)
+        InputStreamReader(stream).use { reader ->
+            while (true) {
+                val count = reader.read(buffer)
+                if (count < 0) break
+                if (keepLast) {
+                    result.append(buffer, 0, count)
+                    if (result.length > maxChars) {
+                        result.delete(0, result.length - maxChars)
+                    }
+                } else if (result.length < maxChars) {
+                    result.append(buffer, 0, minOf(count, maxChars - result.length))
+                }
+            }
+        }
+        return result.toString()
     }
 
     private fun recordFailure(
@@ -399,4 +446,28 @@ class ShizukuCommandEngine(
         val updated = (listOf(record) + _executionHistory.value).take(30)
         _executionHistory.value = updated
     }
+}
+
+internal fun parseGfxinfoFrameRate(output: String): Float? {
+    val lines = output.lineSequence().toList()
+    val headerIndex = lines.indexOfFirst { it.contains("FRAME_COMPLETED") }
+    if (headerIndex < 0) return null
+    val completedIndex = lines[headerIndex].split(',').indexOfFirst {
+        it.trim() == "FRAME_COMPLETED"
+    }
+    if (completedIndex < 0) return null
+
+    val timestamps = lines.drop(headerIndex + 1).mapNotNull { line ->
+        line.split(',')
+            .getOrNull(completedIndex)
+            ?.trim()
+            ?.toLongOrNull()
+            ?.takeIf { it > 0L }
+    }.takeLast(120)
+    val latest = timestamps.lastOrNull() ?: return null
+    val recent = timestamps.filter { it >= latest - 1_000_000_000L }
+    val first = recent.firstOrNull() ?: return null
+    val spanNs = latest - first
+    if (recent.size < 2 || spanNs <= 0L) return null
+    return (recent.size - 1) * 1_000_000_000f / spanNs
 }

@@ -16,6 +16,7 @@ import com.akenterprises.auroraengine.roblox.RobloxOptimizationEngine
 import com.akenterprises.auroraengine.shizuku.ShizukuCommandEngine
 import com.akenterprises.auroraengine.shizuku.ShizukuConnectionManager
 import com.akenterprises.auroraengine.ui.overlay.EdgePanelOverlayService
+import com.akenterprises.auroraengine.ui.overlay.LiquidControlShadeService
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
@@ -27,6 +28,8 @@ data class AuroraUiState(
     val selectedTab: EdgeTab = EdgeTab.PERFORMANCE,
     val isEdgePanelExpanded: Boolean = true,
     val performanceMode: PerformanceMode = PerformanceMode.BALANCED,
+    val visualTheme: AuroraVisualTheme = AuroraVisualTheme.OXYGEN_OS_16,
+    val liquidFlowType: LiquidFlowType = LiquidFlowType.FLUID_MOTION,
     val touchProfile: TouchProfile = TouchProfile.ULTRA_TOUCH,
     val upscalingMode: UpscalingMode = UpscalingMode.SUPPORTED_CAS,
     val frameGenMultiplier: FrameGenMultiplier = FrameGenMultiplier.OFF,
@@ -49,7 +52,12 @@ data class AuroraUiState(
     val lastRamCleanSummary: String? = null,
     val statusBannerMessage: String = "Aurora Engine v2.0 Smooth Edition Ready.",
     val overlayPermissionGranted: Boolean = false,
-    val isOverlayServiceActive: Boolean = false
+    val isOverlayServiceActive: Boolean = false,
+    val canWriteSystemSettings: Boolean = false,
+    val systemApplyProgress: Float? = null,
+    val measuredFps: Int? = null,
+    val fpsFromRoblox: Boolean = false,
+    val isControlShadeActive: Boolean = false
 )
 
 class AuroraViewModel(application: Application) : AndroidViewModel(application) {
@@ -71,12 +79,14 @@ class AuroraViewModel(application: Application) : AndroidViewModel(application) 
     private val _uiState = MutableStateFlow(
         AuroraUiState(
             performanceMode = prefs.selectedMode,
+            visualTheme = prefs.visualTheme,
+            liquidFlowType = prefs.liquidFlowType,
             touchProfile = prefs.touchProfile,
             upscalingMode = prefs.upscalingMode,
             frameGenMultiplier = prefs.frameGenMultiplier,
             casSharpness = prefs.casSharpness,
             autoDetectRoblox = prefs.autoDetectRoblox,
-            smoothAnimations = prefs.smoothPanelAnimations,
+            smoothAnimations = true,
             telemetryPolling = prefs.enableTelemetryPolling
         )
     )
@@ -88,6 +98,7 @@ class AuroraViewModel(application: Application) : AndroidViewModel(application) 
     private var telemetryJob: Job? = null
 
     init {
+        prefs.smoothPanelAnimations = true
         shizukuConnectionManager.registerListeners(
             onDisconnected = {
                 viewModelScope.launch {
@@ -100,6 +111,14 @@ class AuroraViewModel(application: Application) : AndroidViewModel(application) 
                 }
             }
         )
+
+        viewModelScope.launch {
+            telemetryMonitor.measuredFrameRate.collect { fps ->
+                _uiState.update {
+                    if (it.fpsFromRoblox) it else it.copy(measuredFps = fps?.toInt())
+                }
+            }
+        }
 
         viewModelScope.launch(Dispatchers.IO) {
             val bench = withContext(Dispatchers.Default) {
@@ -117,7 +136,7 @@ class AuroraViewModel(application: Application) : AndroidViewModel(application) 
             while (true) {
                 delay(4000L)
                 if (_uiState.value.telemetryPolling) {
-                    refreshAllTelemetryNow(includePing = false)
+                    refreshAllTelemetryNow(includePing = true)
                 }
             }
         }
@@ -133,6 +152,11 @@ class AuroraViewModel(application: Application) : AndroidViewModel(application) 
         val shizuku = shizukuConnectionManager.refreshStatus()
         val hw = telemetryMonitor.sampleDeviceProfile(includeNetworkPing = includePing)
         val roblox = robloxEngine.inspectRobloxStatus()
+        val gameFps = if (shizuku.canExecutePrivileged && roblox.isRunning) {
+            shizukuCommandEngine.sampleRobloxFrameRate()
+        } else {
+            null
+        }
         val canOverlay = Settings.canDrawOverlays(appContext)
         _uiState.update {
             it.copy(
@@ -140,14 +164,62 @@ class AuroraViewModel(application: Application) : AndroidViewModel(application) 
                 hardwareProfile = hw,
                 robloxStatus = roblox,
                 overlayPermissionGranted = canOverlay,
-                isOverlayServiceActive = EdgePanelOverlayService.isOverlayRunning
+                isOverlayServiceActive = EdgePanelOverlayService.isOverlayRunning,
+                isControlShadeActive = LiquidControlShadeService.isOverlayRunning,
+                canWriteSystemSettings = Settings.System.canWrite(appContext),
+                measuredFps = gameFps?.toInt() ?: telemetryMonitor.measuredFrameRate.value?.toInt(),
+                fpsFromRoblox = gameFps != null
             )
+        }
+    }
+
+    fun toggleVisualTheme() {
+        val next = if (_uiState.value.visualTheme == AuroraVisualTheme.OXYGEN_OS_16) {
+            AuroraVisualTheme.COLOR_OS_17
+        } else {
+            AuroraVisualTheme.OXYGEN_OS_16
+        }
+        prefs.visualTheme = next
+        _uiState.update { it.copy(visualTheme = next) }
+    }
+
+    fun selectLiquidFlowType(type: LiquidFlowType) {
+        prefs.liquidFlowType = type
+        _uiState.update { it.copy(liquidFlowType = type) }
+    }
+
+    fun applySystemTransformation() {
+        if (_uiState.value.systemApplyProgress != null) return
+        viewModelScope.launch {
+            for (step in 1..25) {
+                delay(100L)
+                _uiState.update { it.copy(systemApplyProgress = step / 25f) }
+            }
+            val current = _uiState.value
+            val supportedHz = current.hardwareProfile?.supportedRefreshRatesHz ?: listOf(60f, 90f, 120f)
+            val report = withContext(Dispatchers.IO) {
+                performanceModeController.applyMode(
+                    mode = current.performanceMode,
+                    touchProfile = current.touchProfile,
+                    supportedRefreshRates = supportedHz
+                )
+            }
+            _uiState.update {
+                it.copy(
+                    systemApplyProgress = null,
+                    statusBannerMessage = report.summary
+                )
+            }
         }
     }
 
     fun selectTab(tab: EdgeTab) {
         _uiState.update { it.copy(selectedTab = tab) }
     }
+
+    fun startFrameRateMonitoring() = telemetryMonitor.startFrameRateMonitoring()
+
+    fun stopFrameRateMonitoring() = telemetryMonitor.stopFrameRateMonitoring()
 
     fun toggleEdgePanelExpanded() {
         _uiState.update { it.copy(isEdgePanelExpanded = !it.isEdgePanelExpanded) }
@@ -370,6 +442,23 @@ class AuroraViewModel(application: Application) : AndroidViewModel(application) 
         }
     }
 
+    fun toggleLiquidControlShade() {
+        if (!Settings.canDrawOverlays(appContext)) {
+            _uiState.update {
+                it.copy(statusBannerMessage = "Grant 'Display over other apps' permission before starting Liquid Control Centre.")
+            }
+            return
+        }
+        val intent = Intent(appContext, LiquidControlShadeService::class.java)
+        if (LiquidControlShadeService.isOverlayRunning) {
+            appContext.stopService(intent)
+            _uiState.update { it.copy(isControlShadeActive = false) }
+        } else {
+            appContext.startForegroundService(intent)
+            _uiState.update { it.copy(isControlShadeActive = true) }
+        }
+    }
+
     fun updateSettingFlags(
         autoDetectRoblox: Boolean = _uiState.value.autoDetectRoblox,
         smoothAnimations: Boolean = _uiState.value.smoothAnimations,
@@ -395,6 +484,8 @@ class AuroraViewModel(application: Application) : AndroidViewModel(application) 
             _uiState.update {
                 it.copy(
                     performanceMode = PerformanceMode.BALANCED,
+                    visualTheme = AuroraVisualTheme.OXYGEN_OS_16,
+                    liquidFlowType = LiquidFlowType.FLUID_MOTION,
                     touchProfile = TouchProfile.ULTRA_TOUCH,
                     upscalingMode = UpscalingMode.SUPPORTED_CAS,
                     frameGenMultiplier = FrameGenMultiplier.OFF,
@@ -410,6 +501,7 @@ class AuroraViewModel(application: Application) : AndroidViewModel(application) 
 
     override fun onCleared() {
         shizukuConnectionManager.unregisterListeners()
+        telemetryMonitor.stopFrameRateMonitoring()
         telemetryJob?.cancel()
         super.onCleared()
     }

@@ -39,7 +39,7 @@ class FrameGenerationService : Service() {
         val lastProcessLatencyMs: Float = 0f,
         val averageMotionSad: Int = 0,
         val processedFramesCount: Long = 0L,
-        val         statusNote: String = "Hardware pacing is separate from optional frame-capture analysis."
+        val statusNote: String = "Aurora Frame Generation capture analysis is separate from Roblox rendering and display presentation."
     )
 
     companion object {
@@ -184,7 +184,7 @@ class FrameGenerationService : Service() {
                             lastProcessLatencyMs = procMs,
                             averageMotionSad = sad,
                             processedFramesCount = processedCount,
-                            statusNote = "Capture analysis only (max 4 Hz, ${String.format("%.2f", procMs)} ms); no Roblox frames are generated."
+                            statusNote = "Aurora Frame Generation analysis only (max 4 Hz, ${String.format("%.2f", procMs)} ms); frames are not presented or injected into Roblox."
                         )
                     }
 
@@ -209,7 +209,7 @@ class FrameGenerationService : Service() {
         _telemetry.value = PipelineTelemetry(
             isCapturing = true,
             multiplier = multiplier,
-            statusNote = "Optional ${captureWidth}x${captureHeight} capture analysis is active, throttled to 4 Hz; no Roblox frames are generated."
+            statusNote = "Aurora Frame Generation capture analysis is active at ${captureWidth}x${captureHeight}, throttled to 4 Hz; it does not replace display output."
         )
     }
 
@@ -247,8 +247,8 @@ class FrameGenerationService : Service() {
     private fun buildForegroundNotification(multiplier: Int): Notification {
         return NotificationCompat.Builder(this, AuroraApplication.CHANNEL_FRAMEGEN_ID)
             .setSmallIcon(R.drawable.ic_stat_aurora)
-            .setContentTitle("Aurora Engine • Optional Capture Analysis")
-            .setContentText("${multiplier}X analysis label; sampling is throttled to at most 4 frames per second.")
+            .setContentTitle("Aurora Frame Generation • Capture Analysis")
+            .setContentText("${multiplier}X low-rate analysis; no intermediate frames are presented.")
             .setOngoing(true)
             .setPriority(NotificationCompat.PRIORITY_LOW)
             .build()

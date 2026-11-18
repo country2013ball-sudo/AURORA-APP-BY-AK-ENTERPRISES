@@ -14,14 +14,14 @@ enum class PerformanceMode(
 ) {
     BATTERY(
         id = "battery",
-        title = "Battery",
-        badgeLabel = "Power-Saving",
+        title = "Power-saving",
+        badgeLabel = "Battery Mode",
         subtitle = "Smooth everyday usage, reduced background work, and conservative GPU scheduling.",
-        accentHex = 0xFF00C853,
+        accentHex = 0xFF84CC16,
         containerHex = 0xFF0D3B1E,
-        windowAnimationScale = 0.75f,
-        transitionAnimationScale = 0.75f,
-        animatorDurationScale = 0.75f,
+        windowAnimationScale = 0.85f,
+        transitionAnimationScale = 0.85f,
+        animatorDurationScale = 0.85f,
         enableDecorativeUiAnimations = true
     ),
     BALANCED(
@@ -29,11 +29,11 @@ enum class PerformanceMode(
         title = "Balanced",
         badgeLabel = "Balanced • Gold",
         subtitle = "Polished desktop-grade transitions paired with Roblox-aware resource scheduling.",
-        accentHex = 0xFFFFC107,
+        accentHex = 0xFF84CC16,
         containerHex = 0xFF3E2F05,
-        windowAnimationScale = 1.0f,
-        transitionAnimationScale = 1.0f,
-        animatorDurationScale = 1.0f,
+        windowAnimationScale = 0.70f,
+        transitionAnimationScale = 0.70f,
+        animatorDurationScale = 0.70f,
         enableDecorativeUiAnimations = true
     ),
     PERFORMANCE(
@@ -41,13 +41,23 @@ enum class PerformanceMode(
         title = "Pro Gamer",
         badgeLabel = "Performance • Crimson",
         subtitle = "Maximum supported gaming responsiveness, reduced UI overhead, and active Roblox monitoring.",
-        accentHex = 0xFFFF1744,
+        accentHex = 0xFFEF4444,
         containerHex = 0xFF420808,
         windowAnimationScale = 0.5f,
         transitionAnimationScale = 0.5f,
         animatorDurationScale = 0.5f,
-        enableDecorativeUiAnimations = false
+        enableDecorativeUiAnimations = true
     )
+}
+
+enum class AuroraVisualTheme(val label: String, val accentHex: Long) {
+    OXYGEN_OS_16("OxygenOS 16 • OP Gaming Core", 0xFF84CC16),
+    COLOR_OS_17("ColorOS 17 • HYPERBOOST", 0xFFEF4444)
+}
+
+enum class LiquidFlowType(val label: String) {
+    FLUID_MOTION("Fluid Motion"),
+    FLUID_FUSION("Fluid Fusion")
 }
 
 enum class TouchProfile(val label: String, val description: String) {
@@ -90,9 +100,9 @@ enum class FrameGenMultiplier(
     val hardwareDownscale: String?
 ) {
     OFF(1, "OFF", 0.0, false, null),
-    X2(2, "2X Experimental", 14.0, true, "0.85"),
-    X3(3, "3X Experimental", 9.5, true, "0.8"),
-    X4(4, "4X Experimental", 7.0, true, "0.75")
+    X2(2, "2X", 14.0, true, "0.85"),
+    X3(3, "3X", 9.5, true, "0.8"),
+    X4(4, "4X", 7.0, true, "0.75")
 }
 
 enum class EdgeTab(val title: String) {
@@ -136,10 +146,10 @@ data class DeviceHardwareProfile(
     val vulkanVersionLabel: String,
     val currentRefreshRateHz: Float,
     val supportedRefreshRatesHz: List<Float>,
-    val batteryPercent: Int,
-    val batteryTempCelsius: Float,
+    val batteryPercent: Int?,
+    val batteryTempCelsius: Float?,
     val thermalStatusLabel: String,
-    val networkLatencyEstimateMs: Float
+    val networkLatencyEstimateMs: Float?
 )
 
 data class RobloxSessionStatus(

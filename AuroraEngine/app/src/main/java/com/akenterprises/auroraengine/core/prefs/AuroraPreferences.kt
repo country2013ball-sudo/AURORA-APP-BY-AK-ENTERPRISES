@@ -3,6 +3,8 @@ package com.akenterprises.auroraengine.core.prefs
 import android.content.Context
 import android.content.SharedPreferences
 import com.akenterprises.auroraengine.core.model.FrameGenMultiplier
+import com.akenterprises.auroraengine.core.model.AuroraVisualTheme
+import com.akenterprises.auroraengine.core.model.LiquidFlowType
 import com.akenterprises.auroraengine.core.model.PerformanceMode
 import com.akenterprises.auroraengine.core.model.TouchProfile
 import com.akenterprises.auroraengine.core.model.UpscalingMode
@@ -39,6 +41,18 @@ class AuroraPreferences(context: Context) {
             return FrameGenMultiplier.entries.find { it.multiplier == mult } ?: FrameGenMultiplier.OFF
         }
         set(value) = prefs.edit().putInt("framegen_mult", value.multiplier).apply()
+
+    var visualTheme: AuroraVisualTheme
+        get() = AuroraVisualTheme.entries.find {
+            it.name == prefs.getString("visual_theme", AuroraVisualTheme.OXYGEN_OS_16.name)
+        } ?: AuroraVisualTheme.OXYGEN_OS_16
+        set(value) = prefs.edit().putString("visual_theme", value.name).apply()
+
+    var liquidFlowType: LiquidFlowType
+        get() = LiquidFlowType.entries.find {
+            it.name == prefs.getString("liquid_flow_type", LiquidFlowType.FLUID_MOTION.name)
+        } ?: LiquidFlowType.FLUID_MOTION
+        set(value) = prefs.edit().putString("liquid_flow_type", value.name).apply()
 
     var autoDetectRoblox: Boolean
         get() = prefs.getBoolean("auto_detect_roblox", true)

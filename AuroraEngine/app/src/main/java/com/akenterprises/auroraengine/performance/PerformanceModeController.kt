@@ -59,7 +59,7 @@ class PerformanceModeController(
                 mode = mode,
                 shizukuAuthorized = false,
                 records = emptyList(),
-                summary = "${mode.title} profile selected. Authorize Shizuku to apply 120Hz lock, hardware scaling, and GameMode."
+                summary = "${mode.title} profile selected. Authorize Shizuku to apply its animation scales, supported refresh target, and GameManager settings."
             )
         }
 

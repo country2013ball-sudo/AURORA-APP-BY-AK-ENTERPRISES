@@ -4,6 +4,7 @@ import com.akenterprises.auroraengine.core.model.FrameGenMultiplier
 import com.akenterprises.auroraengine.core.model.PerformanceMode
 import com.akenterprises.auroraengine.core.model.ShizukuStatus
 import com.akenterprises.auroraengine.core.model.UpscalingMode
+import com.akenterprises.auroraengine.shizuku.parseGfxinfoFrameRate
 import org.junit.Assert.*
 import org.junit.Test
 
@@ -23,12 +24,15 @@ class AuroraEngineUnitTest {
 
     @Test
     fun performanceModesHaveDistinctVisualAccentsAndAnimationScales() {
-        assertEquals(0xFF00C853, PerformanceMode.BATTERY.accentHex)
-        assertEquals(0xFFFFC107, PerformanceMode.BALANCED.accentHex)
-        assertEquals(0xFFFF1744, PerformanceMode.PERFORMANCE.accentHex)
+        assertEquals(0xFF84CC16, PerformanceMode.BATTERY.accentHex)
+        assertEquals(0xFF84CC16, PerformanceMode.BALANCED.accentHex)
+        assertEquals(0xFFEF4444, PerformanceMode.PERFORMANCE.accentHex)
 
+        assertEquals(0.85f, PerformanceMode.BATTERY.windowAnimationScale)
+        assertEquals(0.70f, PerformanceMode.BALANCED.windowAnimationScale)
+        assertEquals(0.50f, PerformanceMode.PERFORMANCE.windowAnimationScale)
         assertTrue(PerformanceMode.BALANCED.enableDecorativeUiAnimations)
-        assertFalse(PerformanceMode.PERFORMANCE.enableDecorativeUiAnimations)
+        assertTrue(PerformanceMode.PERFORMANCE.enableDecorativeUiAnimations)
     }
 
     @Test
@@ -49,5 +53,18 @@ class AuroraEngineUnitTest {
         assertEquals("0.8", FrameGenMultiplier.X3.hardwareDownscale)
         assertEquals("0.75", FrameGenMultiplier.X4.hardwareDownscale)
         assertNull(FrameGenMultiplier.OFF.hardwareDownscale)
+    }
+
+    @Test
+    fun gfxinfoFrameRateUsesCompletedFrameTimestampsAndRejectsMissingData() {
+        val sample = """
+            FLAGS,INTENDED_VSYNC,VSYNC,FRAME_COMPLETED
+            0,1,1,1000000000
+            0,2,2,1016666667
+            0,3,3,1033333334
+        """.trimIndent()
+
+        assertEquals(60f, requireNotNull(parseGfxinfoFrameRate(sample)), 0.1f)
+        assertNull(parseGfxinfoFrameRate("no frame stats available"))
     }
 }

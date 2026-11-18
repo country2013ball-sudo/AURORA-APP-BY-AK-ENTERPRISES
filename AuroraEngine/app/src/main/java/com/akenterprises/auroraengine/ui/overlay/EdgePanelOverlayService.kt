@@ -1,7 +1,6 @@
 package com.akenterprises.auroraengine.ui.overlay
 
 import android.annotation.SuppressLint
-import android.app.ActivityManager
 import android.app.Notification
 import android.app.PendingIntent
 import android.app.Service
@@ -29,6 +28,7 @@ import com.akenterprises.auroraengine.AuroraApplication
 import com.akenterprises.auroraengine.MainActivity
 import com.akenterprises.auroraengine.R
 import com.akenterprises.auroraengine.core.model.PerformanceMode
+import com.akenterprises.auroraengine.core.model.AuroraVisualTheme
 import com.akenterprises.auroraengine.core.model.TouchProfile
 import com.akenterprises.auroraengine.core.model.UpscalingMode
 import com.akenterprises.auroraengine.core.prefs.AuroraPreferences
@@ -139,7 +139,7 @@ class EdgePanelOverlayService : Service() {
             y = -dp(90)
         }
 
-        val modeColor = prefs.selectedMode.accentHex.toInt()
+        val modeColor = prefs.visualTheme.accentHex.toInt()
         val handle = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             gravity = Gravity.CENTER
@@ -260,8 +260,7 @@ class EdgePanelOverlayService : Service() {
         }
 
         val currentMode = prefs.selectedMode
-        val accentInt = currentMode.accentHex.toInt()
-        val (availRamMb, totalRamMb) = readQuickRamMb()
+        val accentInt = prefs.visualTheme.accentHex.toInt()
         val battery = readQuickBattery()
         val batPct = battery?.first?.toString() ?: "--"
         val batTempC = battery?.second?.let { String.format(Locale.US, "%.1f", it) } ?: "--"
@@ -374,10 +373,22 @@ class EdgePanelOverlayService : Service() {
             gravity = Gravity.CENTER_VERTICAL
         }
         headerRow.addView(TextView(this).apply {
-            text = "AURORA HYPERBOOST MINI"
+            text = if (prefs.visualTheme == AuroraVisualTheme.OXYGEN_OS_16) {
+                "OP GAMING CORE"
+            } else {
+                "HYPERBOOST"
+            }
             textSize = 10.5f
             typeface = Typeface.DEFAULT_BOLD
-            setTextColor(Color.parseColor("#FFD4AF37"))
+            setTextColor(accentInt)
+            setOnClickListener {
+                prefs.visualTheme = if (prefs.visualTheme == AuroraVisualTheme.OXYGEN_OS_16) {
+                    AuroraVisualTheme.COLOR_OS_17
+                } else {
+                    AuroraVisualTheme.OXYGEN_OS_16
+                }
+                showExpandedInGameMiniPanel()
+            }
         }, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f))
 
         headerRow.addView(TextView(this).apply {
@@ -388,7 +399,7 @@ class EdgePanelOverlayService : Service() {
         })
         mainCard.addView(headerRow)
 
-        // Telemetry Triad Row (FPS Target | Battery & Temp | Free RAM)
+        // Unknown values remain blank until they can be measured by the active app.
         val triadRow = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER
@@ -418,14 +429,10 @@ class EdgePanelOverlayService : Service() {
             }
         }
 
-        val targetFpsStr = when (currentMode) {
-            PerformanceMode.BATTERY -> "60"
-            PerformanceMode.BALANCED -> "90"
-            PerformanceMode.PERFORMANCE -> "120"
-        }
-        triadRow.addView(buildMetricBox("Refresh", targetFpsStr, "Hz Target"), LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f))
-        triadRow.addView(buildMetricBox("Battery", "$batPct%", "${batTempC}°C"), LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f))
-        triadRow.addView(buildMetricBox("Free RAM", "$availRamMb", "/ $totalRamMb MB"), LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f))
+        triadRow.addView(buildMetricBox("Frame rate", "--", "FPS"), LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f))
+        val batteryLabel = if (batPct == "--") "--" else "$batPct%"
+        triadRow.addView(buildMetricBox("Battery", batteryLabel, "${batTempC}°C"), LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f))
+        triadRow.addView(buildMetricBox("Network", "--", "ms"), LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f))
         mainCard.addView(triadRow)
 
         // 3-Mode Selector Pill Row (Power-saving | Balanced | Pro Gamer)
@@ -439,7 +446,7 @@ class EdgePanelOverlayService : Service() {
         }
 
         val modeSpecs = listOf(
-            PerformanceMode.BATTERY to "Battery",
+            PerformanceMode.BATTERY to "Power-saving",
             PerformanceMode.BALANCED to "Balanced",
             PerformanceMode.PERFORMANCE to "Pro Gamer"
         )
@@ -452,14 +459,14 @@ class EdgePanelOverlayService : Service() {
                 typeface = if (selected) Typeface.DEFAULT_BOLD else Typeface.DEFAULT
                 setPadding(dp(4), dp(7), dp(4), dp(7))
                 setTextColor(
-                    if (selected && modeItem != PerformanceMode.PERFORMANCE) Color.parseColor("#090A0F")
+                    if (selected && prefs.visualTheme == AuroraVisualTheme.OXYGEN_OS_16) Color.parseColor("#090A0F")
                     else if (selected) Color.WHITE
                     else Color.parseColor("#A0AAB8")
                 )
                 if (selected) {
                     background = GradientDrawable().apply {
                         cornerRadius = dp(15).toFloat()
-                        setColor(modeItem.accentHex.toInt())
+                        setColor(accentInt)
                     }
                 }
                 setOnClickListener {
@@ -567,13 +574,6 @@ class EdgePanelOverlayService : Service() {
             Log.e(TAG, "Overlay permission was revoked before the panel was attached.", e)
             stopSelf()
         }
-    }
-
-    private fun readQuickRamMb(): Pair<Long, Long> {
-        val am = getSystemService(Context.ACTIVITY_SERVICE) as ActivityManager
-        val mi = ActivityManager.MemoryInfo()
-        am.getMemoryInfo(mi)
-        return (mi.availMem / (1024L * 1024L)) to (mi.totalMem / (1024L * 1024L))
     }
 
     private fun readQuickBattery(): Pair<Int, Float>? {

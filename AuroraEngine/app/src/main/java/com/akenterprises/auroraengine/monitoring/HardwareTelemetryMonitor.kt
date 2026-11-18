@@ -13,12 +13,19 @@ import android.opengl.EGLSurface
 import android.opengl.GLES20
 import android.os.BatteryManager
 import android.os.Build
+import android.os.Handler
+import android.os.Looper
 import android.os.PowerManager
 import android.os.SystemClock
+import android.view.Choreographer
 import android.view.WindowManager
 import com.akenterprises.auroraengine.core.model.DeviceHardwareProfile
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asStateFlow
+import java.util.ArrayDeque
 import java.io.File
 import java.net.InetSocketAddress
 import java.net.Socket
@@ -30,6 +37,52 @@ import java.net.Socket
  * Tuned for Samsung Galaxy A07 5G (4 GB RAM, ARM Mali-G57) while remaining 100% dynamic on any Android phone.
  */
 class HardwareTelemetryMonitor(private val context: Context) {
+
+    private val mainHandler = Handler(Looper.getMainLooper())
+    private val frameTimesNs = ArrayDeque<Long>()
+    private val _measuredFrameRate = MutableStateFlow<Float?>(null)
+    val measuredFrameRate: StateFlow<Float?> = _measuredFrameRate.asStateFlow()
+    private var frameCallback: Choreographer.FrameCallback? = null
+    private var lastFpsUpdateNs = 0L
+
+    fun startFrameRateMonitoring() {
+        mainHandler.post {
+            if (frameCallback != null) return@post
+            frameTimesNs.clear()
+            lastFpsUpdateNs = 0L
+            val callback = object : Choreographer.FrameCallback {
+                override fun doFrame(frameTimeNanos: Long) {
+                    frameTimesNs.addLast(frameTimeNanos)
+                    val cutoff = frameTimeNanos - 1_000_000_000L
+                    while (frameTimesNs.size > 2 && frameTimesNs.first() < cutoff) {
+                        frameTimesNs.removeFirst()
+                    }
+                    if (frameTimeNanos - lastFpsUpdateNs >= 500_000_000L) {
+                        val first = frameTimesNs.firstOrNull()
+                        val span = first?.let { frameTimeNanos - it } ?: 0L
+                        _measuredFrameRate.value = if (span > 0L && frameTimesNs.size > 1) {
+                            (frameTimesNs.size - 1) * 1_000_000_000f / span
+                        } else {
+                            null
+                        }
+                        lastFpsUpdateNs = frameTimeNanos
+                    }
+                    Choreographer.getInstance().postFrameCallback(this)
+                }
+            }
+            frameCallback = callback
+            Choreographer.getInstance().postFrameCallback(callback)
+        }
+    }
+
+    fun stopFrameRateMonitoring() {
+        mainHandler.post {
+            frameCallback?.let(Choreographer.getInstance()::removeFrameCallback)
+            frameCallback = null
+            frameTimesNs.clear()
+            _measuredFrameRate.value = null
+        }
+    }
 
     private var cachedGlRenderer: String? = null
     private var cachedGlVendor: String? = null
@@ -63,7 +116,7 @@ class HardwareTelemetryMonitor(private val context: Context) {
             val (currentHz, supportedHz) = queryDisplayRefreshRates()
             val (batteryPct, batteryTempC) = queryBatteryTelemetry()
             val thermalLabel = queryThermalStatus(batteryTempC)
-            val latencyMs = if (includeNetworkPing) measureTcpLatencyMs() else 14.2f
+            val latencyMs = if (includeNetworkPing) measureTcpLatencyMs() else null
 
             val socName = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
                 Build.SOC_MODEL.takeIf { it.isNotBlank() && it != Build.UNKNOWN } ?: Build.HARDWARE
@@ -150,44 +203,47 @@ class HardwareTelemetryMonitor(private val context: Context) {
         }
     }
 
-    private fun queryBatteryTelemetry(): Pair<Int, Float> {
+    private fun queryBatteryTelemetry(): Pair<Int?, Float?> {
         return try {
             val intent = context.registerReceiver(null, IntentFilter(Intent.ACTION_BATTERY_CHANGED))
-            val level = intent?.getIntExtra(BatteryManager.EXTRA_LEVEL, -1) ?: -1
-            val scale = intent?.getIntExtra(BatteryManager.EXTRA_SCALE, -1) ?: -1
-            val pct = if (level >= 0 && scale > 0) (level * 100) / scale else 85
-            val tempTenths = intent?.getIntExtra(BatteryManager.EXTRA_TEMPERATURE, 340) ?: 340
-            pct to (tempTenths / 10.0f)
+                ?: return null to null
+            val level = intent.getIntExtra(BatteryManager.EXTRA_LEVEL, -1)
+            val scale = intent.getIntExtra(BatteryManager.EXTRA_SCALE, -1)
+            val pct = if (level >= 0 && scale > 0) (level * 100) / scale else null
+            val tempTenths = intent.getIntExtra(BatteryManager.EXTRA_TEMPERATURE, -1)
+            pct to tempTenths.takeIf { it >= 0 }?.div(10.0f)
         } catch (_: Throwable) {
-            85 to 34.0f
+            null to null
         }
     }
 
-    private fun queryThermalStatus(batteryTempC: Float): String {
+    private fun queryThermalStatus(batteryTempC: Float?): String {
+        val temperature = batteryTempC?.let { String.format("%.1f", it) } ?: "N/A"
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
             try {
                 val pm = context.getSystemService(Context.POWER_SERVICE) as PowerManager
                 return when (pm.currentThermalStatus) {
-                    PowerManager.THERMAL_STATUS_NONE -> "Nominal (${String.format("%.1f", batteryTempC)}°C)"
-                    PowerManager.THERMAL_STATUS_LIGHT -> "Light Warmth (${String.format("%.1f", batteryTempC)}°C)"
-                    PowerManager.THERMAL_STATUS_MODERATE -> "Moderate Load (${String.format("%.1f", batteryTempC)}°C)"
-                    PowerManager.THERMAL_STATUS_SEVERE -> "Thermal Caution (${String.format("%.1f", batteryTempC)}°C)"
+                    PowerManager.THERMAL_STATUS_NONE -> "Nominal (${temperature}°C)"
+                    PowerManager.THERMAL_STATUS_LIGHT -> "Light Warmth (${temperature}°C)"
+                    PowerManager.THERMAL_STATUS_MODERATE -> "Moderate Load (${temperature}°C)"
+                    PowerManager.THERMAL_STATUS_SEVERE -> "Thermal Caution (${temperature}°C)"
                     PowerManager.THERMAL_STATUS_CRITICAL,
                     PowerManager.THERMAL_STATUS_EMERGENCY,
-                    PowerManager.THERMAL_STATUS_SHUTDOWN -> "Critical Thermal Limit (${String.format("%.1f", batteryTempC)}°C)"
-                    else -> "Normal (${String.format("%.1f", batteryTempC)}°C)"
+                    PowerManager.THERMAL_STATUS_SHUTDOWN -> "Critical Thermal Limit (${temperature}°C)"
+                    else -> "Normal (${temperature}°C)"
                 }
             } catch (_: Throwable) {
             }
         }
+        if (batteryTempC == null) return "Thermal status unavailable"
         return if (batteryTempC >= 42.0f) {
-            "Warm (${String.format("%.1f", batteryTempC)}°C)"
+            "Warm (${temperature}°C)"
         } else {
-            "Normal (${String.format("%.1f", batteryTempC)}°C)"
+            "Normal (${temperature}°C)"
         }
     }
 
-    private fun measureTcpLatencyMs(): Float {
+    private fun measureTcpLatencyMs(): Float? {
         return try {
             val start = SystemClock.elapsedRealtimeNanos()
             Socket().use { socket ->
@@ -196,7 +252,7 @@ class HardwareTelemetryMonitor(private val context: Context) {
             val elapsedMs = (SystemClock.elapsedRealtimeNanos() - start) / 1_000_000f
             elapsedMs.coerceIn(1.0f, 999.0f)
         } catch (_: Throwable) {
-            12.4f
+            null
         }
     }
 }

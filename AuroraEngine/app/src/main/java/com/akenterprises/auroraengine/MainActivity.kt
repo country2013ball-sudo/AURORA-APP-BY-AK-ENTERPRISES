@@ -1,11 +1,16 @@
 package com.akenterprises.auroraengine
 
+import android.app.Activity
+import android.content.Context
 import android.content.Intent
+import android.media.projection.MediaProjectionManager
 import android.net.Uri
 import android.os.Bundle
 import android.provider.Settings
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.activity.viewModels
 import androidx.compose.animation.*
 import androidx.compose.animation.core.FastOutSlowInEasing
@@ -16,16 +21,13 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
-import androidx.compose.ui.geometry.Offset
-import androidx.compose.ui.geometry.Size
-import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.graphics.StrokeCap
-import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
@@ -36,6 +38,10 @@ import com.akenterprises.auroraengine.framegeneration.FrameGenerationService
 import com.akenterprises.auroraengine.graphics.NativeFrameProcessor
 import com.akenterprises.auroraengine.ui.AuroraUiState
 import com.akenterprises.auroraengine.ui.AuroraViewModel
+import com.akenterprises.auroraengine.ui.animation.AuroraSplashIntro
+import com.akenterprises.auroraengine.ui.animation.liquidTransition
+
+private val MainAccentRed = Color(0xFFEF4444)
 
 class MainActivity : ComponentActivity() {
 
@@ -48,21 +54,34 @@ class MainActivity : ComponentActivity() {
             val commandHistory by viewModel.commandHistory.collectAsState()
             val frameTelemetry by viewModel.frameGenTelemetry.collectAsState()
             val context = LocalContext.current
+            var splashFinished by rememberSaveable { mutableStateOf(false) }
+            val projectionManager = context.getSystemService(Context.MEDIA_PROJECTION_SERVICE) as MediaProjectionManager
+            val frameCaptureLauncher = rememberLauncherForActivityResult(
+                ActivityResultContracts.StartActivityForResult()
+            ) { result ->
+                if (result.resultCode == Activity.RESULT_OK) {
+                    result.data?.let { viewModel.startMediaProjectionCapture(result.resultCode, it) }
+                }
+            }
 
             MaterialTheme(
                 colorScheme = darkColorScheme(
-                    primary = Color(state.performanceMode.accentHex),
+                    primary = MainAccentRed,
                     background = Color(0xFF090A0F),
                     surface = Color(0xFF12141C)
                 )
             ) {
-                AuroraEdgePanelRoot(
+                if (!splashFinished) {
+                    AuroraSplashIntro { splashFinished = true }
+                } else AuroraEdgePanelRoot(
                     state = state,
                     commandHistory = commandHistory,
                     frameTelemetry = frameTelemetry,
                     onSelectTab = viewModel::selectTab,
                     onTogglePanel = viewModel::toggleEdgePanelExpanded,
                     onSelectMode = viewModel::selectPerformanceMode,
+                    onSelectLiquidFlow = viewModel::selectLiquidFlowType,
+                    onApplySystemTransformation = viewModel::applySystemTransformation,
                     onSelectTouch = viewModel::selectTouchProfile,
                     onSelectRefreshHz = viewModel::selectTargetRefreshRate,
                     onRequestShizuku = viewModel::requestShizukuPermission,
@@ -77,6 +96,9 @@ class MainActivity : ComponentActivity() {
                     onStopFrameGen = {
                         viewModel.setFrameGenMultiplierSelection(FrameGenMultiplier.OFF)
                     },
+                    onStartFrameAnalysis = {
+                        frameCaptureLauncher.launch(projectionManager.createScreenCaptureIntent())
+                    },
                     onRequestOverlayPermission = {
                         val intent = Intent(
                             Settings.ACTION_MANAGE_OVERLAY_PERMISSION,
@@ -84,6 +106,14 @@ class MainActivity : ComponentActivity() {
                         )
                         context.startActivity(intent)
                     },
+                    onRequestWriteSettings = {
+                        val intent = Intent(
+                            Settings.ACTION_MANAGE_WRITE_SETTINGS,
+                            Uri.parse("package:${context.packageName}")
+                        )
+                        context.startActivity(intent)
+                    },
+                    onToggleLiquidControlShade = viewModel::toggleLiquidControlShade,
                     onToggleOverlayService = viewModel::toggleFloatingOverlayService,
                     onUpdateFlags = viewModel::updateSettingFlags,
                     onResetAll = viewModel::resetAllSettings
@@ -94,7 +124,13 @@ class MainActivity : ComponentActivity() {
 
     override fun onResume() {
         super.onResume()
+        viewModel.startFrameRateMonitoring()
         viewModel.refreshAllTelemetry()
+    }
+
+    override fun onPause() {
+        viewModel.stopFrameRateMonitoring()
+        super.onPause()
     }
 }
 
@@ -106,6 +142,8 @@ fun AuroraEdgePanelRoot(
     onSelectTab: (EdgeTab) -> Unit,
     onTogglePanel: () -> Unit,
     onSelectMode: (PerformanceMode) -> Unit,
+    onSelectLiquidFlow: (LiquidFlowType) -> Unit,
+    onApplySystemTransformation: () -> Unit,
     onSelectTouch: (TouchProfile) -> Unit,
     onSelectRefreshHz: (Float) -> Unit,
     onRequestShizuku: () -> Unit,
@@ -118,34 +156,25 @@ fun AuroraEdgePanelRoot(
     onRerunBenchmark: () -> Unit,
     onSelectFrameGen: (FrameGenMultiplier) -> Unit,
     onStopFrameGen: () -> Unit,
+    onStartFrameAnalysis: () -> Unit,
     onRequestOverlayPermission: () -> Unit,
+    onRequestWriteSettings: () -> Unit,
+    onToggleLiquidControlShade: () -> Unit,
     onToggleOverlayService: () -> Unit,
     onUpdateFlags: (Boolean, Boolean, Boolean) -> Unit,
     onResetAll: () -> Unit
 ) {
-    val accentColor = Color(state.performanceMode.accentHex)
-    val goldColor = Color(0xFFD4AF37)
-    val crimsonColor = Color(0xFFD50000)
+    val accentColor = MainAccentRed
 
     Box(
         modifier = Modifier
             .fillMaxSize()
-            .background(
-                Brush.verticalGradient(
-                    colors = listOf(
-                        Color(0xFF090A0F),
-                        Color(0xFF11131C),
-                        Color(0xFF090A0F)
-                    )
-                )
-            )
-            .padding(horizontal = 10.dp, vertical = 12.dp)
+            .background(Color(0xFF090A0F))
+            .padding(horizontal = 12.dp, vertical = 10.dp)
     ) {
         Column(modifier = Modifier.fillMaxSize()) {
-            // Top Branding Bar: AK ENTERPRISES (Golden) + AURORA ENGINE (Deep Crimson)
             TopBrandingHeader(
                 shizukuStatus = state.shizukuStatus,
-                mode = state.performanceMode,
                 isExpanded = state.isEdgePanelExpanded,
                 onToggleExpand = onTogglePanel,
                 onClickShizukuBadge = { onSelectTab(EdgeTab.SHIZUKU) }
@@ -174,13 +203,14 @@ fun AuroraEdgePanelRoot(
                 EdgeNavigationRailPill(
                     selectedTab = state.selectedTab,
                     accentColor = accentColor,
-                    goldColor = goldColor,
                     shizukuAuthorized = state.shizukuStatus.canExecutePrivileged,
                     onSelectTab = onSelectTab
                 )
 
                 // RIGHT MAIN FLOATING GAME PANEL CARD
-                val animDuration = if (state.smoothAnimations && state.performanceMode.enableDecorativeUiAnimations) 260 else 0
+                val animDuration = if (!state.smoothAnimations) 0 else {
+                    if (state.performanceMode == PerformanceMode.PERFORMANCE) 130 else 260
+                }
                 AnimatedVisibility(
                     visible = state.isEdgePanelExpanded,
                     enter = fadeIn(tween(animDuration, easing = FastOutSlowInEasing)) +
@@ -195,15 +225,14 @@ fun AuroraEdgePanelRoot(
                             .fillMaxSize()
                             .clip(RoundedCornerShape(26.dp))
                             .background(Color(0xFF12141B))
+                            .liquidTransition(
+                                type = state.liquidFlowType,
+                                enabled = state.smoothAnimations && state.selectedTab == EdgeTab.PERFORMANCE,
+                                speed = if (state.performanceMode == PerformanceMode.PERFORMANCE) 0.5f else 1f
+                            )
                             .border(
                                 width = 1.dp,
-                                brush = Brush.verticalGradient(
-                                    listOf(
-                                        accentColor.copy(alpha = 0.55f),
-                                        Color(0xFF252936),
-                                        goldColor.copy(alpha = 0.25f)
-                                    )
-                                ),
+                                color = Color(0xFF303039),
                                 shape = RoundedCornerShape(26.dp)
                             )
                             .padding(16.dp)
@@ -213,22 +242,17 @@ fun AuroraEdgePanelRoot(
                                 .fillMaxSize()
                                 .verticalScroll(rememberScrollState())
                         ) {
-                            // Panel Top Subtitle (OP Gaming Core / HyperBoost style header)
                             Row(
                                 modifier = Modifier.fillMaxWidth(),
                                 horizontalArrangement = Arrangement.Center,
                                 verticalAlignment = Alignment.CenterVertically
                             ) {
                                 Text(
-                                    text = if (state.performanceMode == PerformanceMode.PERFORMANCE) {
-                                        "AURORA HYPERBOOST CORE"
-                                    } else {
-                                        "AE GAMING CORE • ${state.performanceMode.badgeLabel.uppercase()}"
-                                    },
-                                    color = Color(0xFFA0AAB8),
-                                    fontSize = 11.sp,
-                                    fontWeight = FontWeight.SemiBold,
-                                    letterSpacing = 1.2.sp
+                                    text = "PERFORMANCE",
+                                    color = Color.White,
+                                    fontSize = 12.sp,
+                                    fontWeight = FontWeight.Bold,
+                                    letterSpacing = 0.8.sp
                                 )
                             }
 
@@ -236,9 +260,9 @@ fun AuroraEdgePanelRoot(
 
                             // TELEMETRY TRIAD GAUGES (Frame Rate • Battery • Network/RAM)
                             TelemetryTriadHeader(
-                                mode = state.performanceMode,
+                                fps = state.measuredFps,
+                                fpsFromRoblox = state.fpsFromRoblox,
                                 hw = state.hardwareProfile,
-                                frameTelemetry = frameTelemetry,
                                 accentColor = accentColor
                             )
 
@@ -247,6 +271,7 @@ fun AuroraEdgePanelRoot(
                             // 3-MODE SEGMENTED PILL BAR (Power-saving / Balanced / Pro Gamer)
                             ThreeModeSelectorBar(
                                 selectedMode = state.performanceMode,
+                                accentColor = accentColor,
                                 onSelectMode = onSelectMode
                             )
 
@@ -258,7 +283,11 @@ fun AuroraEdgePanelRoot(
                                     state = state,
                                     accentColor = accentColor,
                                     onSelectTouch = onSelectTouch,
+                                    onSelectLiquidFlow = onSelectLiquidFlow,
                                     onSelectRefreshHz = onSelectRefreshHz,
+                                    onApplySystemTransformation = onApplySystemTransformation,
+                                    onRequestWriteSettings = onRequestWriteSettings,
+                                    onSelectFrameGen = onSelectFrameGen,
                                     onStartGaming = onStartGaming,
                                     onStopGaming = onStopGaming
                                 )
@@ -277,7 +306,8 @@ fun AuroraEdgePanelRoot(
                                     onUpdateSharpness = onUpdateSharpness,
                                     onRerunBenchmark = onRerunBenchmark,
                                     onSelectFrameGen = onSelectFrameGen,
-                                    onStopFrameGen = onStopFrameGen
+                                    onStopFrameGen = onStopFrameGen,
+                                    onStartFrameAnalysis = onStartFrameAnalysis
                                 )
                                 EdgeTab.RAM -> RamManagerContent(
                                     state = state,
@@ -298,6 +328,8 @@ fun AuroraEdgePanelRoot(
                                     onSelectMode = onSelectMode,
                                     onUpdateFlags = onUpdateFlags,
                                     onRequestOverlayPermission = onRequestOverlayPermission,
+                                    onRequestWriteSettings = onRequestWriteSettings,
+                                    onToggleLiquidControlShade = onToggleLiquidControlShade,
                                     onToggleOverlayService = onToggleOverlayService,
                                     onResetAll = onResetAll
                                 )
@@ -333,7 +365,6 @@ fun AuroraEdgePanelRoot(
 @Composable
 private fun TopBrandingHeader(
     shizukuStatus: ShizukuStatus,
-    mode: PerformanceMode,
     isExpanded: Boolean,
     onToggleExpand: () -> Unit,
     onClickShizukuBadge: () -> Unit
@@ -343,7 +374,7 @@ private fun TopBrandingHeader(
             .fillMaxWidth()
             .clip(RoundedCornerShape(18.dp))
             .background(Color(0xFF12141C))
-            .border(1.dp, Color(0xFF2A2E3D), RoundedCornerShape(18.dp))
+            .border(1.dp, Color(0xFF303039), RoundedCornerShape(18.dp))
             .padding(horizontal = 14.dp, vertical = 10.dp),
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.SpaceBetween
@@ -354,29 +385,28 @@ private fun TopBrandingHeader(
                 modifier = Modifier
                     .size(38.dp)
                     .clip(RoundedCornerShape(10.dp))
-                    .background(Color(0xFF1B1014))
-                    .border(1.5.dp, Color(0xFFD4AF37), RoundedCornerShape(10.dp)),
+                    .background(Color(0xFF17171B))
+                    .border(1.dp, Color(0xFF303039), RoundedCornerShape(10.dp)),
                 contentAlignment = Alignment.Center
             ) {
-                Text(
-                    text = "AE",
-                    color = Color(0xFFFF1744),
-                    fontWeight = FontWeight.ExtraBold,
-                    fontSize = 15.sp
+                Image(
+                    painter = painterResource(R.drawable.ic_aurora_brand_logo),
+                    contentDescription = "Aurora AE emblem",
+                    modifier = Modifier.fillMaxSize()
                 )
             }
             Spacer(modifier = Modifier.width(10.dp))
             Column {
                 Text(
-                    text = "AK ENTERPRISES",
-                    color = Color(0xFFD4AF37),
+                    text = "AK by AK Enterprises",
+                    color = Color(0xFFB8B8C0),
                     fontSize = 9.sp,
                     fontWeight = FontWeight.Bold,
                     letterSpacing = 1.6.sp
                 )
                 Text(
                     text = "AURORA ENGINE",
-                    color = Color(0xFFE53935),
+                    color = Color.White,
                     fontSize = 16.sp,
                     fontWeight = FontWeight.ExtraBold,
                     letterSpacing = 0.8.sp
@@ -385,8 +415,8 @@ private fun TopBrandingHeader(
         }
 
         Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            val badgeBg = if (shizukuStatus.canExecutePrivileged) Color(0xFF0D3B1E) else Color(0xFF3E1212)
-            val badgeFg = if (shizukuStatus.canExecutePrivileged) Color(0xFF00E676) else Color(0xFFFF5252)
+            val badgeBg = if (shizukuStatus.canExecutePrivileged) Color(0xFF202026) else Color(0xFF3E171B)
+            val badgeFg = if (shizukuStatus.canExecutePrivileged) Color.White else MainAccentRed
             Box(
                 modifier = Modifier
                     .clip(RoundedCornerShape(50))
@@ -412,7 +442,7 @@ private fun TopBrandingHeader(
             ) {
                 Text(
                     text = if (isExpanded) "Hide" else "Panel",
-                    color = Color(0xFFD4AF37),
+                    color = Color.White,
                     fontSize = 11.sp,
                     fontWeight = FontWeight.SemiBold
                 )
@@ -432,7 +462,7 @@ private fun MandatoryShizukuGateBanner(
             .fillMaxWidth()
             .clip(RoundedCornerShape(14.dp))
             .background(Color(0xFF281115))
-            .border(1.dp, Color(0xFFFF5252).copy(alpha = 0.6f), RoundedCornerShape(14.dp))
+            .border(1.dp, MainAccentRed.copy(alpha = 0.6f), RoundedCornerShape(14.dp))
             .padding(12.dp),
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.SpaceBetween
@@ -440,7 +470,7 @@ private fun MandatoryShizukuGateBanner(
         Column(modifier = Modifier.weight(1f)) {
             Text(
                 text = "MANDATORY SHIZUKU AUTHORIZATION REQUIRED",
-                color = Color(0xFFFF8A80),
+                color = MainAccentRed,
                 fontSize = 11.sp,
                 fontWeight = FontWeight.Bold
             )
@@ -473,7 +503,6 @@ private fun MandatoryShizukuGateBanner(
 private fun EdgeNavigationRailPill(
     selectedTab: EdgeTab,
     accentColor: Color,
-    goldColor: Color,
     shizukuAuthorized: Boolean,
     onSelectTab: (EdgeTab) -> Unit
 ) {
@@ -541,7 +570,7 @@ private fun EdgeNavigationRailPill(
                 .background(Color(0xFF1A1E2B))
                 .border(
                     width = 1.5.dp,
-                    color = if (shizukuAuthorized) accentColor else goldColor,
+                    color = if (shizukuAuthorized) accentColor else Color.White,
                     shape = CircleShape
                 )
                 .clickable { onSelectTab(EdgeTab.HOME) },
@@ -549,7 +578,7 @@ private fun EdgeNavigationRailPill(
         ) {
             Text(
                 text = "⬢",
-                color = if (shizukuAuthorized) accentColor else goldColor,
+                color = if (shizukuAuthorized) accentColor else Color.White,
                 fontSize = 18.sp
             )
         }
@@ -558,155 +587,43 @@ private fun EdgeNavigationRailPill(
 
 @Composable
 private fun TelemetryTriadHeader(
-    mode: PerformanceMode,
+    fps: Int?,
+    fpsFromRoblox: Boolean,
     hw: DeviceHardwareProfile?,
-    frameTelemetry: FrameGenerationService.PipelineTelemetry,
     accentColor: Color
 ) {
-    val displayFps = when {
-        frameTelemetry.isCapturing && frameTelemetry.interpolatedEffectiveFps > 0f ->
-            frameTelemetry.interpolatedEffectiveFps.toInt()
-        hw != null -> hw.currentRefreshRateHz.toInt()
-        else -> 60
-    }
-    val batteryPct = hw?.batteryPercent ?: 86
-    val netMs = hw?.networkLatencyEstimateMs ?: 10.9f
-    val isProRed = mode == PerformanceMode.PERFORMANCE
+    val displayFps = fps?.toString() ?: "--"
+    val batteryPct = hw?.batteryPercent?.toString() ?: "--"
+    val netLatencyMs = hw?.networkLatencyEstimateMs
+    val netMs = netLatencyMs?.let { String.format("%.1f", it) } ?: "--"
 
     Row(
         modifier = Modifier
             .fillMaxWidth()
             .padding(vertical = 4.dp),
-        horizontalArrangement = Arrangement.SpaceEvenly,
+        horizontalArrangement = Arrangement.spacedBy(8.dp),
         verticalAlignment = Alignment.CenterVertically
     ) {
-        if (isProRed) {
-            // ColorOS 17 HyperBoost layout: Battery (Left) | Frame rate (Center Large) | Network (Right)
-            CompactSideMetric(
-                title = "Battery",
-                value = "$batteryPct",
-                unit = "%",
-                accentColor = accentColor
-            )
-            CenterAngularFpsGauge(
-                fps = displayFps,
-                accentColor = accentColor
-            )
-            CompactSideMetric(
-                title = "Network",
-                value = String.format("%.0f", netMs),
-                unit = "ms",
-                accentColor = accentColor
-            )
-        } else {
-            // OxygenOS 16 OP Gaming Core layout: Circular Frame rate (Left) | Battery (Center) | Circular Network (Right)
-            CircularTelemetryGauge(
-                title = "Frame rate",
-                valueText = "$displayFps",
-                unitText = "fps",
-                progress = (displayFps / 120f).coerceIn(0.15f, 1f),
-                accentColor = accentColor
-            )
-            Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                Text(text = "Battery", color = Color(0xFF9AA4B2), fontSize = 11.sp)
-                Spacer(modifier = Modifier.height(4.dp))
-                Text(
-                    text = "$batteryPct%",
-                    color = Color.White,
-                    fontSize = 18.sp,
-                    fontWeight = FontWeight.Bold
-                )
-                Text(
-                    text = "${String.format("%.1f", hw?.batteryTempCelsius ?: 35.0f)}°C",
-                    color = Color(0xFF8A94A6),
-                    fontSize = 10.sp
-                )
-            }
-            CircularTelemetryGauge(
-                title = "Network",
-                valueText = String.format("%.1f", netMs),
-                unitText = "ms",
-                progress = (1f - (netMs / 120f)).coerceIn(0.2f, 0.95f),
-                accentColor = accentColor
-            )
-        }
-    }
-}
-
-@Composable
-private fun CircularTelemetryGauge(
-    title: String,
-    valueText: String,
-    unitText: String,
-    progress: Float,
-    accentColor: Color
-) {
-    Box(
-        modifier = Modifier.size(104.dp),
-        contentAlignment = Alignment.Center
-    ) {
-        Canvas(modifier = Modifier.fillMaxSize()) {
-            val strokeWidth = 6.dp.toPx()
-            val arcSize = Size(size.width - strokeWidth * 2, size.height - strokeWidth * 2)
-            val topLeft = Offset(strokeWidth, strokeWidth)
-
-            drawArc(
-                color = Color(0xFF222834),
-                startAngle = 135f,
-                sweepAngle = 270f,
-                useCenter = false,
-                topLeft = topLeft,
-                size = arcSize,
-                style = Stroke(width = strokeWidth, cap = StrokeCap.Round)
-            )
-            drawArc(
-                color = accentColor,
-                startAngle = 135f,
-                sweepAngle = 270f * progress,
-                useCenter = false,
-                topLeft = topLeft,
-                size = arcSize,
-                style = Stroke(width = strokeWidth, cap = StrokeCap.Round)
-            )
-        }
-        Column(horizontalAlignment = Alignment.CenterHorizontally) {
-            Text(text = title, color = Color(0xFFA0AAB8), fontSize = 10.sp)
-            Text(
-                text = valueText,
-                color = Color.White,
-                fontSize = 22.sp,
-                fontWeight = FontWeight.ExtraBold
-            )
-            Text(text = unitText, color = Color(0xFF8A94A6), fontSize = 10.sp)
-        }
-    }
-}
-
-@Composable
-private fun CenterAngularFpsGauge(
-    fps: Int,
-    accentColor: Color
-) {
-    Column(
-        modifier = Modifier
-            .clip(RoundedCornerShape(18.dp))
-            .background(Color(0xFF1A1014))
-            .border(1.dp, accentColor.copy(alpha = 0.5f), RoundedCornerShape(18.dp))
-            .padding(horizontal = 20.dp, vertical = 10.dp),
-        horizontalAlignment = Alignment.CenterHorizontally
-    ) {
-        Text(text = "Frame rate", color = Color(0xFFB0B8C4), fontSize = 11.sp)
-        Text(
-            text = "$fps",
-            color = Color.White,
-            fontSize = 30.sp,
-            fontWeight = FontWeight.ExtraBold
+        CompactSideMetric(
+            title = if (fpsFromRoblox) "Frame rate" else "UI frame rate",
+            value = displayFps,
+            unit = "FPS",
+            accentColor = accentColor,
+            modifier = Modifier.weight(1f)
         )
-        Text(
-            text = "FPS",
-            color = accentColor,
-            fontSize = 11.sp,
-            fontWeight = FontWeight.Bold
+        CompactSideMetric(
+            title = "Battery",
+            value = batteryPct,
+            unit = "%",
+            accentColor = accentColor,
+            modifier = Modifier.weight(1f)
+        )
+        CompactSideMetric(
+            title = "Network",
+            value = netMs,
+            unit = "ms",
+            accentColor = accentColor,
+            modifier = Modifier.weight(1f)
         )
     }
 }
@@ -716,10 +633,14 @@ private fun CompactSideMetric(
     title: String,
     value: String,
     unit: String,
-    accentColor: Color
+    accentColor: Color,
+    modifier: Modifier = Modifier
 ) {
-    Column(horizontalAlignment = Alignment.CenterHorizontally) {
-        Text(text = title, color = Color(0xFF9AA4B2), fontSize = 11.sp)
+    Column(
+        modifier = modifier,
+        horizontalAlignment = Alignment.CenterHorizontally
+    ) {
+        Text(text = title, color = Color(0xFFB8B8C0), fontSize = 10.sp)
         Spacer(modifier = Modifier.height(4.dp))
         Text(
             text = value,
@@ -734,6 +655,7 @@ private fun CompactSideMetric(
 @Composable
 private fun ThreeModeSelectorBar(
     selectedMode: PerformanceMode,
+    accentColor: Color,
     onSelectMode: (PerformanceMode) -> Unit
 ) {
     Row(
@@ -746,9 +668,8 @@ private fun ThreeModeSelectorBar(
     ) {
         PerformanceMode.entries.forEach { mode ->
             val selected = mode == selectedMode
-            val pillColor = if (selected) Color(mode.accentHex) else Color.Transparent
+            val pillColor = if (selected) accentColor else Color.Transparent
             val textColor = when {
-                selected && mode != PerformanceMode.PERFORMANCE -> Color(0xFF090A0F)
                 selected -> Color.White
                 else -> Color(0xFFA0AAB8)
             }
@@ -784,7 +705,11 @@ private fun PerformancePanelContent(
     state: AuroraUiState,
     accentColor: Color,
     onSelectTouch: (TouchProfile) -> Unit,
+    onSelectLiquidFlow: (LiquidFlowType) -> Unit,
     onSelectRefreshHz: (Float) -> Unit,
+    onApplySystemTransformation: () -> Unit,
+    onRequestWriteSettings: () -> Unit,
+    onSelectFrameGen: (FrameGenMultiplier) -> Unit,
     onStartGaming: (Boolean) -> Unit,
     onStopGaming: () -> Unit
 ) {
@@ -826,6 +751,38 @@ private fun PerformancePanelContent(
                     text = profile.label,
                     color = if (active) accentColor else Color(0xFFD0D7E2),
                     fontSize = 13.sp,
+                    fontWeight = if (active) FontWeight.Bold else FontWeight.Medium
+                )
+            }
+        }
+    }
+
+    Spacer(modifier = Modifier.height(16.dp))
+
+    Text("Liquid Flow Engine", color = Color.White, fontSize = 14.sp, fontWeight = FontWeight.SemiBold)
+    Text(
+        "Fluid Motion uses spring response; Fluid Fusion smoothly morphs card shapes.",
+        color = Color(0xFF7D8796),
+        fontSize = 11.sp
+    )
+    Spacer(modifier = Modifier.height(8.dp))
+    Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+        LiquidFlowType.entries.forEach { type ->
+            val active = state.liquidFlowType == type
+            Box(
+                modifier = Modifier
+                    .weight(1f)
+                    .clip(RoundedCornerShape(14.dp))
+                    .background(if (active) accentColor.copy(alpha = 0.14f) else Color(0xFF1B1E28))
+                    .border(1.dp, if (active) accentColor else Color(0xFF282D3C), RoundedCornerShape(14.dp))
+                    .clickable { onSelectLiquidFlow(type) }
+                    .padding(vertical = 12.dp),
+                contentAlignment = Alignment.Center
+            ) {
+                Text(
+                    type.label,
+                    color = if (active) accentColor else Color(0xFFD0D7E2),
+                    fontSize = 12.sp,
                     fontWeight = if (active) FontWeight.Bold else FontWeight.Medium
                 )
             }
@@ -883,6 +840,75 @@ private fun PerformancePanelContent(
                         fontSize = 9.sp
                     )
                 }
+            }
+        }
+    }
+
+    Spacer(modifier = Modifier.height(12.dp))
+    OutlinedButton(
+        onClick = onRequestWriteSettings,
+        modifier = Modifier.fillMaxWidth()
+    ) {
+        Text(
+            if (state.canWriteSystemSettings) "Modify System Settings • Granted"
+            else "Grant Modify System Settings",
+            color = accentColor,
+            fontSize = 11.sp
+        )
+    }
+    Button(
+        onClick = onApplySystemTransformation,
+        enabled = state.systemApplyProgress == null,
+        colors = ButtonDefaults.buttonColors(containerColor = accentColor),
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(top = 8.dp)
+    ) {
+        Text(
+            if (state.systemApplyProgress != null) "APPLYING • ${(state.systemApplyProgress * 100).toInt()}%"
+            else "CHANGE / APPLY (2-3s)",
+            color = Color.White,
+            fontSize = 12.sp,
+            fontWeight = FontWeight.Bold
+        )
+    }
+    state.systemApplyProgress?.let { progress ->
+        LinearProgressIndicator(
+            progress = progress,
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(top = 6.dp),
+            color = accentColor
+        )
+    }
+
+    Spacer(modifier = Modifier.height(14.dp))
+    Text("Aurora Frame Generation", color = Color.White, fontSize = 14.sp, fontWeight = FontWeight.SemiBold)
+    Text(
+        "2X/3X selections request hardware pacing; optional capture analysis does not replace game output.",
+        color = Color(0xFF7D8796),
+        fontSize = 10.sp
+    )
+    Spacer(modifier = Modifier.height(8.dp))
+    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+        listOf(FrameGenMultiplier.OFF, FrameGenMultiplier.X2, FrameGenMultiplier.X3).forEach { multiplier ->
+            val selected = state.frameGenMultiplier == multiplier
+            Box(
+                modifier = Modifier
+                    .weight(1f)
+                    .clip(RoundedCornerShape(12.dp))
+                    .background(if (selected) accentColor.copy(alpha = 0.18f) else Color(0xFF1B1E28))
+                    .border(1.dp, if (selected) accentColor else Color(0xFF282D3C), RoundedCornerShape(12.dp))
+                    .clickable { onSelectFrameGen(multiplier) }
+                    .padding(vertical = 10.dp),
+                contentAlignment = Alignment.Center
+            ) {
+                Text(
+                    if (multiplier == FrameGenMultiplier.OFF) "OFF" else multiplier.label,
+                    color = if (selected) accentColor else Color(0xFFD0D7E2),
+                    fontSize = 12.sp,
+                    fontWeight = if (selected) FontWeight.Bold else FontWeight.Medium
+                )
             }
         }
     }
@@ -973,7 +999,11 @@ private fun HomeDashboardContent(
             Text("• OpenGL ES: ${hw?.glEsVersion ?: "OpenGL ES 3.2"}", color = Color(0xFFCFD6E0), fontSize = 11.sp)
             Text("• Vulkan API: ${hw?.vulkanVersionLabel ?: "Vulkan 1.1 / 1.3 Supported"}", color = Color(0xFFCFD6E0), fontSize = 11.sp)
             Text("• System RAM: ${hw?.availableRamMb ?: 1850} MB free / ${hw?.totalRamMb ?: 4096} MB total", color = Color(0xFFCFD6E0), fontSize = 11.sp)
-            Text("• Thermal & Battery: ${hw?.thermalStatusLabel ?: "Nominal"} • ${hw?.batteryPercent ?: 86}%", color = Color(0xFFCFD6E0), fontSize = 11.sp)
+            Text(
+                "• Thermal & Battery: ${hw?.thermalStatusLabel ?: "Unknown"} • ${hw?.batteryPercent?.let { "$it%" } ?: "--"}",
+                color = Color(0xFFCFD6E0),
+                fontSize = 11.sp
+            )
         }
         Spacer(modifier = Modifier.height(8.dp))
         OutlinedButton(
@@ -994,7 +1024,8 @@ private fun GraphicsTechnologyContent(
     onUpdateSharpness: (Float) -> Unit,
     onRerunBenchmark: () -> Unit,
     onSelectFrameGen: (FrameGenMultiplier) -> Unit,
-    onStopFrameGen: () -> Unit
+    onStopFrameGen: () -> Unit,
+    onStartFrameAnalysis: () -> Unit
 ) {
     InfoCard(
         title = "Graphics Renderer & Hardware Verification",
@@ -1041,13 +1072,13 @@ private fun GraphicsTechnologyContent(
                 ) {
                     Text(
                         text = mode.label,
-                        color = if (unsupported) Color(0xFFFF8A80) else Color.White,
+                        color = if (unsupported) MainAccentRed else Color.White,
                         fontSize = 12.sp,
                         fontWeight = FontWeight.Bold
                     )
                     Text(
                         text = mode.badge,
-                        color = if (unsupported) Color(0xFFFF5252) else accentColor,
+                        color = if (unsupported) MainAccentRed else accentColor,
                         fontSize = 10.sp,
                         fontWeight = FontWeight.SemiBold
                     )
@@ -1072,10 +1103,11 @@ private fun GraphicsTechnologyContent(
 
     Spacer(modifier = Modifier.height(12.dp))
 
-    Text("B. LSFG-Inspired Hardware Frame Pacing (Experimental)", color = Color.White, fontSize = 13.sp, fontWeight = FontWeight.Bold)
+    Text("B. Aurora Frame Generation", color = Color.White, fontSize = 13.sp, fontWeight = FontWeight.Bold)
     Text(
-        text = "Requests Android GameManager downscaling and display refresh pacing. " +
-            "This does not synthesize Roblox frames or alter its internal simulation FPS.",
+        text = "2X/3X selections request hardware pacing. Optional MediaProjection capture analysis uses the native processor, " +
+            "but Android does not let this app replace Roblox's rendered output; no Roblox or kernel injection occurs, " +
+            "and no generated FPS is claimed.",
         color = Color(0xFF8A94A6),
         fontSize = 10.sp
     )
@@ -1097,8 +1129,8 @@ private fun GraphicsTechnologyContent(
                 contentAlignment = Alignment.Center
             ) {
                 Text(
-                    text = if (mult == FrameGenMultiplier.OFF) "OFF" else "${mult.multiplier}X Exp",
-                    color = if (selected) Color(0xFF090A0F) else Color.White,
+                    text = if (mult == FrameGenMultiplier.OFF) "OFF" else mult.label,
+                    color = Color.White,
                     fontSize = 11.sp,
                     fontWeight = FontWeight.Bold
                 )
@@ -1133,6 +1165,13 @@ private fun GraphicsTechnologyContent(
                         modifier = Modifier.weight(1f)
                     ) {
                         Text("Stop Capture", color = Color.White, fontSize = 11.sp)
+                    }
+                } else {
+                    OutlinedButton(
+                        onClick = onStartFrameAnalysis,
+                        modifier = Modifier.weight(1f)
+                    ) {
+                        Text("Start Capture Analysis", color = accentColor, fontSize = 11.sp)
                     }
                 }
             }
@@ -1187,7 +1226,7 @@ private fun RamManagerContent(
         ) {
             Text(
                 text = "REDUCE BACKGROUND MEMORY COMPETITION",
-                color = if (state.performanceMode == PerformanceMode.PERFORMANCE) Color.White else Color(0xFF090A0F),
+                color = Color.White,
                 fontSize = 12.sp,
                 fontWeight = FontWeight.Bold
             )
@@ -1228,7 +1267,7 @@ private fun ShizukuCenterContent(
             ) {
                 Text(
                     text = if (s.canExecutePrivileged) "Re-Verify Binder" else "Request Authorization",
-                    color = if (state.performanceMode == PerformanceMode.PERFORMANCE) Color.White else Color(0xFF090A0F),
+                    color = Color.White,
                     fontSize = 11.sp,
                     fontWeight = FontWeight.Bold
                 )
@@ -1248,7 +1287,7 @@ private fun ShizukuCenterContent(
     ) {
         Text("Whitelisted Command Audit Log", color = Color.White, fontSize = 13.sp, fontWeight = FontWeight.Bold)
         TextButton(onClick = onRollbackAll) {
-            Text("Rollback All", color = Color(0xFFFF5252), fontSize = 11.sp)
+            Text("Rollback All", color = MainAccentRed, fontSize = 11.sp)
         }
     }
 
@@ -1268,7 +1307,7 @@ private fun ShizukuCenterContent(
                     .background(Color(0xFF1A1D28))
                     .border(
                         1.dp,
-                        if (rec.isSuccess) Color(0xFF1E4620) else Color(0xFF4A1C1C),
+                        if (rec.isSuccess) Color(0xFF303039) else MainAccentRed.copy(alpha = 0.6f),
                         RoundedCornerShape(10.dp)
                     )
                     .padding(8.dp)
@@ -1281,18 +1320,18 @@ private fun ShizukuCenterContent(
                         Text(rec.optimizationName, color = Color.White, fontSize = 11.sp, fontWeight = FontWeight.Bold)
                         Text(
                             text = if (rec.isSuccess) "EXIT 0" else "BLOCKED/ERR",
-                            color = if (rec.isSuccess) Color(0xFF00E676) else Color(0xFFFF5252),
+                            color = if (rec.isSuccess) Color.White else MainAccentRed,
                             fontSize = 10.sp,
                             fontWeight = FontWeight.Bold
                         )
                     }
-                    Text("Cmd: ${rec.command}", color = Color(0xFFD4AF37), fontSize = 10.sp)
+                    Text("Cmd: ${rec.command}", color = Color(0xFFB8B8C0), fontSize = 10.sp)
                     Text("Purpose: ${rec.purpose}", color = Color(0xFF9AA4B2), fontSize = 10.sp)
                     if (rec.stdout.isNotBlank()) {
                         Text("Out: ${rec.stdout}", color = Color(0xFFB0BEC5), fontSize = 10.sp)
                     }
                     if (rec.stderr.isNotBlank()) {
-                        Text("Note: ${rec.stderr}", color = Color(0xFFFF8A80), fontSize = 10.sp)
+                        Text("Note: ${rec.stderr}", color = MainAccentRed, fontSize = 10.sp)
                     }
                 }
             }
@@ -1307,6 +1346,8 @@ private fun SettingsPanelContent(
     onSelectMode: (PerformanceMode) -> Unit,
     onUpdateFlags: (Boolean, Boolean, Boolean) -> Unit,
     onRequestOverlayPermission: () -> Unit,
+    onRequestWriteSettings: () -> Unit,
+    onToggleLiquidControlShade: () -> Unit,
     onToggleOverlayService: () -> Unit,
     onResetAll: () -> Unit
 ) {
@@ -1320,15 +1361,7 @@ private fun SettingsPanelContent(
             subtitle = "Checks com.roblox.client installation and process state during telemetry refresh.",
             checked = state.autoDetectRoblox,
             accentColor = accentColor,
-            onCheckedChange = { onUpdateFlags(it, state.smoothAnimations, state.telemetryPolling) }
-        )
-        Divider(color = Color(0xFF262A38), modifier = Modifier.padding(vertical = 6.dp))
-        SettingToggleRow(
-            title = "Smooth Desktop-Grade Panel Transitions",
-            subtitle = "Automatically disabled in Pro Gamer Performance Mode to eliminate UI overhead.",
-            checked = state.smoothAnimations && state.performanceMode.enableDecorativeUiAnimations,
-            accentColor = accentColor,
-            onCheckedChange = { onUpdateFlags(state.autoDetectRoblox, it, state.telemetryPolling) }
+            onCheckedChange = { onUpdateFlags(it, true, state.telemetryPolling) }
         )
         Divider(color = Color(0xFF262A38), modifier = Modifier.padding(vertical = 6.dp))
         SettingToggleRow(
@@ -1336,8 +1369,28 @@ private fun SettingsPanelContent(
             subtitle = "Polls RAM, battery temperature, and refresh rate every 2.5 seconds.",
             checked = state.telemetryPolling,
             accentColor = accentColor,
-            onCheckedChange = { onUpdateFlags(state.autoDetectRoblox, state.smoothAnimations, it) }
+            onCheckedChange = { onUpdateFlags(state.autoDetectRoblox, true, it) }
         )
+    }
+
+    Spacer(modifier = Modifier.height(12.dp))
+
+    InfoCard(
+        title = "Android Modify System Settings",
+        subtitle = if (state.canWriteSystemSettings) {
+            "Permission granted. System changes still require supported Android APIs or Shizuku authorization."
+        } else {
+            "Optional Android permission for user-approved system settings."
+        },
+        accentColor = accentColor
+    ) {
+        OutlinedButton(onClick = onRequestWriteSettings, modifier = Modifier.fillMaxWidth()) {
+            Text(
+                if (state.canWriteSystemSettings) "Permission granted" else "Grant Modify System Settings",
+                color = accentColor,
+                fontSize = 11.sp
+            )
+        }
     }
 
     Spacer(modifier = Modifier.height(12.dp))
@@ -1365,11 +1418,32 @@ private fun SettingsPanelContent(
             ) {
                 Text(
                     text = if (state.isOverlayServiceActive) "Stop Handle" else "Start Handle",
-                    color = if (state.performanceMode == PerformanceMode.PERFORMANCE) Color.White else Color(0xFF090A0F),
+                    color = Color.White,
                     fontSize = 11.sp,
                     fontWeight = FontWeight.Bold
                 )
             }
+        }
+    }
+
+    Spacer(modifier = Modifier.height(12.dp))
+
+    InfoCard(
+        title = "Liquid Control Centre Overlay",
+        subtitle = "App-owned quick settings surface; Android's protected notification shade remains unchanged.",
+        accentColor = accentColor
+    ) {
+        Button(
+            onClick = onToggleLiquidControlShade,
+            colors = ButtonDefaults.buttonColors(containerColor = accentColor),
+            modifier = Modifier.fillMaxWidth()
+        ) {
+            Text(
+                if (state.isControlShadeActive) "STOP CONTROL CENTRE" else "OPEN LIQUID CONTROL CENTRE",
+                color = Color.White,
+                fontSize = 11.sp,
+                fontWeight = FontWeight.Bold
+            )
         }
     }
 
@@ -1382,7 +1456,7 @@ private fun SettingsPanelContent(
     ) {
         Text(
             text = "RESET ALL AURORA ENGINE SETTINGS & ROLLBACK",
-            color = Color(0xFFFF8A80),
+            color = MainAccentRed,
             fontSize = 11.sp,
             fontWeight = FontWeight.Bold
         )
@@ -1415,7 +1489,7 @@ private fun StartGamingButtonBlock(
         ) {
             Text(
                 text = if (shizukuAuthorized) "START GAMING (OPTIMIZE & LAUNCH ROBLOX)" else "START GAMING (REQUIRES SHIZUKU)",
-                color = if (accentColor == Color(0xFFFF1744)) Color.White else Color(0xFF090A0F),
+                color = Color.White,
                 fontSize = 12.sp,
                 fontWeight = FontWeight.ExtraBold
             )
@@ -1427,7 +1501,7 @@ private fun StartGamingButtonBlock(
                 onClick = onStopGaming,
                 modifier = Modifier.fillMaxWidth()
             ) {
-                Text("STOP SESSION & RESTORE SYSTEM DEFAULTS", color = Color(0xFFFF5252), fontSize = 11.sp)
+                Text("STOP SESSION & RESTORE SYSTEM DEFAULTS", color = MainAccentRed, fontSize = 11.sp)
             }
         }
     }

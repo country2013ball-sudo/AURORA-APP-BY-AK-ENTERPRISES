@@ -26,7 +26,7 @@ class AuroraApplication : Application() {
                 getString(R.string.notif_channel_framegen),
                 NotificationManager.IMPORTANCE_LOW
             ).apply {
-                description = "Required foreground notification for MediaProjection frame capture and interpolation."
+                description = "Required foreground notification for user-approved Aurora Frame Generation capture analysis."
                 setShowBadge(false)
             }
 
@@ -35,7 +35,7 @@ class AuroraApplication : Application() {
                 getString(R.string.notif_channel_overlay),
                 NotificationManager.IMPORTANCE_LOW
             ).apply {
-                description = "Active when the collapsible Edge Panel gaming overlay is enabled."
+                description = "Active while a user-enabled Aurora floating control overlay is visible."
                 setShowBadge(false)
             }
 

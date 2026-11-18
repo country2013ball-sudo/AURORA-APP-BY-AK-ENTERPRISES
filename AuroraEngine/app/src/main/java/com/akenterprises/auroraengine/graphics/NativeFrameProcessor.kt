@@ -3,7 +3,7 @@ package com.akenterprises.auroraengine.graphics
 import android.os.SystemClock
 
 /**
- * JNI Bridge & Pure-Kotlin Fallback for Aurora Engine's Experimental Frame Interpolation (LSFG-inspired)
+ * JNI bridge and Kotlin fallback for Aurora Frame Generation's capture-analysis interpolation.
  * and Contrast-Adaptive Sharpening (CAS) Upscaling Pipeline.
  *
  * Clearly distinguishes captured-frame processing from proprietary NVIDIA DLSS or internal game-engine
