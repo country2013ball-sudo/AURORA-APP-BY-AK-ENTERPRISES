@@ -1,5 +1,13 @@
 # Changelog
 
+## 2.0.2 — Shizuku shell execution fix
+
+- Replace timed process waiting plus immediate exit-code lookup with a bounded wait future that obtains `exitValue()` only after process completion.
+- Drain stdout and stderr concurrently to prevent pipe-buffer deadlocks.
+- Return a structured shell result with null exit code for timeout/process-creation failures, actual non-zero exit codes for terminated commands, and timeout/error details.
+- Serialize concurrent Shizuku process execution and keep profile transaction/backups on the shared validated shell path.
+- Add mock-process regression coverage for successful and failed commands, timeout, empty/large output, and concurrent execution.
+
 ## 2.0.1 — Global profile transaction repair
 
 - Route Battery, Balanced, and Performance profile changes through one serialized Shizuku transaction service, shared by the dashboard and floating Edge Panel.
