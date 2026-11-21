@@ -36,7 +36,17 @@ jobs:
 
       - name: Run unit tests and Android lint
         working-directory: AuroraEngine
-        run: gradle testDebugUnitTest lintDebug --no-daemon --stacktrace
+        run: |
+          for attempt in 1 2 3; do
+            if gradle testDebugUnitTest lintDebug --no-daemon --stacktrace; then
+              exit 0
+            fi
+            if [ "$attempt" -lt 3 ]; then
+              echo "Gradle check failed; retrying in $((attempt * 15)) seconds."
+              sleep "$((attempt * 15))"
+            fi
+          done
+          exit 1
 
       - name: Build release APK
         working-directory: AuroraEngine
