@@ -11,8 +11,8 @@ android {
         applicationId = "com.akenterprises.auroraengine"
         minSdk = 26
         targetSdk = 34
-        versionCode = 201
-        versionName = "2.0.1-PROFILE-REPAIR"
+        versionCode = 202
+        versionName = "2.0.2-SHELL-FIX"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         vectorDrawables {
