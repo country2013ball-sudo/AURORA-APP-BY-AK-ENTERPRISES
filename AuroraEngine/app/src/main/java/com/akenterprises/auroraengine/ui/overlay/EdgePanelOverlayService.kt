@@ -95,7 +95,7 @@ class EdgePanelOverlayService : Service() {
         super.onCreate()
         prefs = AuroraPreferences(applicationContext)
         shizukuConnectionManager = ShizukuConnectionManager(applicationContext)
-        shizukuCommandEngine = ShizukuCommandEngine(shizukuConnectionManager)
+        shizukuCommandEngine = ShizukuCommandEngine(shizukuConnectionManager, applicationContext)
         performanceModeController = PerformanceModeController(
             prefs, shizukuConnectionManager, shizukuCommandEngine
         )

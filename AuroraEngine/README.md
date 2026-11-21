@@ -24,6 +24,7 @@ Aurora Engine is an Android companion app for configuring supported device setti
 
 - **Performance controls:** Power-saving, Balanced, and Pro Gamer profiles, plus supported refresh-rate and touch-response selections.
 - **Shizuku integration:** User-authorized privileged commands for supported system changes and Roblox session optimization.
+- **Restore and recovery:** Before a gaming profile changes animation scales or refresh-rate settings, Aurora saves their prior values locally and can restore them later. Android GameManager and fixed-performance overrides are returned to standard/off defaults; values from older installs without a saved snapshot use the documented legacy defaults.
 - **Safe memory tools:** Displays memory telemetry and uses the existing guarded cleanup path rather than indiscriminately killing apps.
 - **Live telemetry:** Battery and network estimates in the edge panel, plus Roblox frame statistics there when Shizuku is authorized and Roblox is running. FPS is not shown in the main app and is not fabricated when unavailable.
 - **Graphics utilities:** Native Contrast-Adaptive Sharpening and an optional MediaProjection capture-analysis prototype. Capture analysis does not replace Roblox's rendered output or promise higher game FPS.

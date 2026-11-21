@@ -1,5 +1,7 @@
 package com.akenterprises.auroraengine.shizuku
 
+import android.content.Context
+import android.content.SharedPreferences
 import android.os.Build
 import com.akenterprises.auroraengine.core.model.CommandExecutionRecord
 import com.akenterprises.auroraengine.core.model.PerformanceMode
@@ -14,6 +16,15 @@ import java.util.Locale
 import java.util.concurrent.CompletableFuture
 import java.util.concurrent.TimeUnit
 
+private const val SETTINGS_SNAPSHOT_KEY = "profile_settings_snapshot"
+private val RESTORABLE_SETTINGS = listOf(
+    "global:window_animation_scale",
+    "global:transition_animation_scale",
+    "global:animator_duration_scale",
+    "system:peak_refresh_rate",
+    "system:min_refresh_rate"
+)
+
 /**
  * V2 Ultra-Fast Batched Shizuku Command Engine.
  *
@@ -27,7 +38,8 @@ import java.util.concurrent.TimeUnit
  *    - Batched animation and refresh-rate settings
  */
 class ShizukuCommandEngine(
-    private val connectionManager: ShizukuConnectionManager
+    private val connectionManager: ShizukuConnectionManager,
+    context: Context
 ) {
 
     data class WhitelistedSpec(
@@ -45,7 +57,10 @@ class ShizukuCommandEngine(
     private val _executionHistory = MutableStateFlow<List<CommandExecutionRecord>>(emptyList())
     val executionHistory: StateFlow<List<CommandExecutionRecord>> = _executionHistory.asStateFlow()
 
-    private val lastExecutedArgs = HashMap<String, String>()
+    private val restorePrefs: SharedPreferences =
+        context.getSharedPreferences("aurora_system_restore", Context.MODE_PRIVATE)
+
+    private val settingsToRestore = RESTORABLE_SETTINGS
 
     private val whitelist: Map<String, WhitelistedSpec> = mapOf(
         "window_anim_scale" to WhitelistedSpec(
@@ -194,6 +209,17 @@ class ShizukuCommandEngine(
         }
         val safeDownscale = downscaleFactor
 
+        if (!captureSettingsSnapshotIfNeeded()) {
+            return@withContext recordFailure(
+                name = "Batched ${mode.title} Profile",
+                purpose = "Saves the current animation and refresh-rate settings so they can be restored later.",
+                cmd = "settings get <profile_settings>",
+                perm = "Shizuku ADB (UID 2000)",
+                versions = "Android 8.0+",
+                stderr = "The current system settings could not be read and saved; no profile changes were applied."
+            )
+        }
+
         val commands = mutableListOf(
             "settings put global window_animation_scale $scale",
             "settings put global transition_animation_scale $scale",
@@ -274,9 +300,6 @@ class ShizukuCommandEngine(
 
         val cmdTokens = spec.commandBuilder(argument)
         val rawResult = runShizukuProcess(cmdTokens, timeoutSeconds)
-        if (rawResult.first == 0) {
-            lastExecutedArgs[specId] = argument
-        }
 
         val record = CommandExecutionRecord(
             optimizationName = spec.name,
@@ -307,7 +330,6 @@ class ShizukuCommandEngine(
     suspend fun rollbackAllReversibleChanges(): List<CommandExecutionRecord> = withContext(Dispatchers.IO) {
         val status = connectionManager.refreshStatus()
         if (!status.canExecutePrivileged) {
-            lastExecutedArgs.clear()
             return@withContext listOf(
                 recordFailure(
                     name = "Full System Rollback",
@@ -319,13 +341,38 @@ class ShizukuCommandEngine(
                 )
             )
         }
-        val commands = mutableListOf(
-            "settings put global window_animation_scale 1.0",
-            "settings put global transition_animation_scale 1.0",
-            "settings put global animator_duration_scale 1.0",
-            "settings put system min_refresh_rate 60.0",
-            "settings put system peak_refresh_rate 90.0"
-        )
+        val hasSavedSnapshot = restorePrefs.contains(SETTINGS_SNAPSHOT_KEY)
+        val savedSettings = loadSettingsSnapshot()
+        if (hasSavedSnapshot && savedSettings == null) {
+            return@withContext listOf(
+                recordFailure(
+                    name = "Full System Rollback",
+                    purpose = "Restores the saved animation and refresh-rate settings.",
+                    cmd = "sh -c <rollback_profile>",
+                    perm = "Shizuku ADB Shell (UID 2000)",
+                    versions = "Android 8.0+",
+                    stderr = "The saved settings snapshot is invalid; no system values were changed."
+                )
+            )
+        }
+        val commands = if (savedSettings != null) {
+            savedSettings.map { (setting, value) ->
+                val (namespace, key) = setting.split(':', limit = 2)
+                if (value == "null") {
+                    "settings delete $namespace $key"
+                } else {
+                    "settings put $namespace $key $value"
+                }
+            }.toMutableList()
+        } else {
+            mutableListOf(
+                "settings put global window_animation_scale 1.0",
+                "settings put global transition_animation_scale 1.0",
+                "settings put global animator_duration_scale 1.0",
+                "settings put system min_refresh_rate 60.0",
+                "settings put system peak_refresh_rate 90.0"
+            )
+        }
         if (Build.VERSION.SDK_INT >= 31) {
             commands += "cmd game mode 1 com.roblox.client"
             commands += "cmd game downscale disable com.roblox.client"
@@ -344,7 +391,11 @@ class ShizukuCommandEngine(
         val raw = runShizukuProcess(listOf("/system/bin/sh", "-c", restoreCmd), 8L)
         val rec = CommandExecutionRecord(
             optimizationName = "Full System Rollback",
-            purpose = "Restores all animation scales, refresh rates, hardware scaling, and GameMode to stock defaults.",
+            purpose = if (savedSettings != null) {
+                "Restores saved animation and refresh-rate settings, plus Aurora GameManager and power overrides."
+            } else {
+                "No saved settings snapshot was available; restores legacy fallback defaults and Aurora GameManager and power overrides."
+            },
             command = restoreCmd,
             requiredPermission = "Shizuku ADB Shell (UID 2000)",
             supportedAndroidVersions = "Android 8.0+",
@@ -354,8 +405,37 @@ class ShizukuCommandEngine(
             rollbackCommand = null
         )
         appendRecord(rec)
-        lastExecutedArgs.clear()
+        if (raw.first == 0 && raw.second.contains("ALL_RESTORED")) {
+            restorePrefs.edit().remove(SETTINGS_SNAPSHOT_KEY).commit()
+        }
         listOf(rec)
+    }
+
+    private fun captureSettingsSnapshotIfNeeded(): Boolean {
+        if (restorePrefs.contains(SETTINGS_SNAPSHOT_KEY)) return loadSettingsSnapshot() != null
+
+        val script = buildString {
+            append("set -e\n")
+            settingsToRestore.forEach { setting ->
+                val (namespace, key) = setting.split(':', limit = 2)
+                append("value=\$(settings get $namespace $key)\n")
+                append("printf '%s\\t%s\\t%s\\n' '$namespace' '$key' \"\$value\"\n")
+            }
+        }
+        val result = runShizukuProcess(
+            listOf("/system/bin/sh", "-c", script),
+            timeoutSec = 5L
+        )
+        if (result.first != 0) return false
+        val snapshot = parseSettingsSnapshot(result.second) ?: return false
+        if (snapshot.keys != settingsToRestore.toSet()) return false
+        val serialized = snapshot.entries.joinToString("\n") { (key, value) -> "$key\t$value" }
+        return restorePrefs.edit().putString(SETTINGS_SNAPSHOT_KEY, serialized).commit()
+    }
+
+    private fun loadSettingsSnapshot(): Map<String, String>? {
+        val serialized = restorePrefs.getString(SETTINGS_SNAPSHOT_KEY, null) ?: return null
+        return parsePersistedSettingsSnapshot(serialized)
     }
 
     private fun runShizukuProcess(
@@ -446,6 +526,32 @@ class ShizukuCommandEngine(
         val updated = (listOf(record) + _executionHistory.value).take(30)
         _executionHistory.value = updated
     }
+}
+
+internal fun parseSettingsSnapshot(output: String): Map<String, String>? {
+    val snapshot = output.lineSequence().mapNotNull { line ->
+        val parts = line.split('\t', limit = 3)
+        if (parts.size != 3) return@mapNotNull null
+        "${parts[0]}:${parts[1]}" to parts[2].trim()
+    }.toMap()
+    if (snapshot.keys != RESTORABLE_SETTINGS.toSet()) return null
+    if (snapshot.values.any { it != "null" && !it.matches(Regex("""\d+(?:\.\d+)?""")) }) {
+        return null
+    }
+    return snapshot
+}
+
+internal fun parsePersistedSettingsSnapshot(serialized: String): Map<String, String>? {
+    val snapshot = serialized.lineSequence().mapNotNull { line ->
+        val separator = line.indexOf('\t')
+        if (separator <= 0) return@mapNotNull null
+        line.substring(0, separator) to line.substring(separator + 1)
+    }.toMap()
+    if (snapshot.keys != RESTORABLE_SETTINGS.toSet()) return null
+    if (snapshot.values.any { it != "null" && !it.matches(Regex("""\d+(?:\.\d+)?""")) }) {
+        return null
+    }
+    return snapshot
 }
 
 internal fun parseGfxinfoFrameRate(output: String): Float? {

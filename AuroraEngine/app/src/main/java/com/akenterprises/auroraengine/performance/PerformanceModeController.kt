@@ -105,9 +105,17 @@ class PerformanceModeController(
 
     suspend fun applyFramePacing(
         multiplier: FrameGenMultiplier,
-        mode: PerformanceMode = prefs.selectedMode
+        mode: PerformanceMode = prefs.selectedMode,
+        supportedRefreshRates: List<Float> = listOf(60f, 90f, 120f)
     ): ModeApplicationReport? {
         val downscaleFactor = framePacingDownscale(multiplier) ?: return null
+        val targetHz = highestSupportedRefreshRate(supportedRefreshRates)
+            ?: return ModeApplicationReport(
+                mode = mode,
+                shizukuAuthorized = false,
+                records = emptyList(),
+                summary = "Frame pacing was not applied because the display reports no supported 60, 90, or 120 Hz mode."
+            )
         val status = shizukuConnectionManager.refreshStatus()
         if (!status.canExecutePrivileged) {
             return ModeApplicationReport(
@@ -120,13 +128,13 @@ class PerformanceModeController(
 
         val record = shizukuCommandEngine.executeBatchedGamingProfile(
             mode = mode,
-            targetHz = 120f,
+            targetHz = targetHz,
             lockMinRefresh = true,
             downscaleFactor = downscaleFactor,
             enableFixedPerfHint = true
         )
         val summary = if (record.isSuccess) {
-            "${multiplier.label} selected: requested 120 Hz and ${downscaleFactor}x game downscale. This is hardware pacing, not generated Roblox frames."
+            "${multiplier.label} selected: requested the supported ${targetHz.toInt()} Hz mode and ${downscaleFactor}x game downscale. This is hardware pacing, not generated Roblox frames."
         } else {
             "Hardware pacing could not be fully applied: ${record.stderr.ifBlank { record.stdout }}"
         }
@@ -138,3 +146,6 @@ class PerformanceModeController(
         )
     }
 }
+
+internal fun highestSupportedRefreshRate(supportedRefreshRates: List<Float>): Float? =
+    supportedRefreshRates.filter { it in setOf(60f, 90f, 120f) }.maxOrNull()

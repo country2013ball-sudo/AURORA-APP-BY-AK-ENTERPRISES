@@ -129,10 +129,15 @@ class RobloxOptimizationEngine(
         activeSession = false
         appliedCount = 0
         val rollbackRecords = shizukuCommandEngine.rollbackAllReversibleChanges()
-        sessionNotice = rollbackRecords
-            .filterNot { it.isSuccess }
-            .takeIf { it.isNotEmpty() }
-            ?.joinToString(prefix = "Rollback incomplete: ") { it.stderr.ifBlank { it.stdout } }
+        val failures = rollbackRecords.filterNot { it.isSuccess }
+        sessionNotice = when {
+            failures.isNotEmpty() ->
+                failures.joinToString(prefix = "Rollback incomplete: ") { it.stderr.ifBlank { it.stdout } }
+            rollbackRecords.any { it.purpose.contains("No saved settings snapshot") } ->
+                "No saved settings snapshot was available; legacy fallback values were applied."
+            else ->
+                "Saved animation and refresh-rate settings restored; game and power overrides returned to defaults."
+        }
         return inspectRobloxStatus()
     }
 

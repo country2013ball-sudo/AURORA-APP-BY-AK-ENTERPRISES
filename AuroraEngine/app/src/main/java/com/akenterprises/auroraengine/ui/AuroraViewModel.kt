@@ -63,7 +63,7 @@ class AuroraViewModel(application: Application) : AndroidViewModel(application) 
     private val appContext = application.applicationContext
     val prefs = AuroraPreferences(appContext)
     val shizukuConnectionManager = ShizukuConnectionManager(appContext)
-    val shizukuCommandEngine = ShizukuCommandEngine(shizukuConnectionManager)
+    val shizukuCommandEngine = ShizukuCommandEngine(shizukuConnectionManager, appContext)
     val telemetryMonitor = HardwareTelemetryMonitor(appContext)
     val safeRamManager = SafeRamManager(appContext, shizukuCommandEngine)
     val performanceModeController = PerformanceModeController(
@@ -320,7 +320,7 @@ class AuroraViewModel(application: Application) : AndroidViewModel(application) 
                 it.copy(
                     robloxStatus = status,
                     frameGenMultiplier = FrameGenMultiplier.OFF,
-                    statusBannerMessage = "Gaming session ended. All Shizuku settings restored to stock defaults."
+                    statusBannerMessage = status.statusSummary
                 )
             }
         }
@@ -370,7 +370,8 @@ class AuroraViewModel(application: Application) : AndroidViewModel(application) 
             selectPerformanceMode(_uiState.value.performanceMode)
         } else {
             viewModelScope.launch(Dispatchers.IO) {
-                val report = performanceModeController.applyFramePacing(mult)
+                val supportedHz = _uiState.value.hardwareProfile?.supportedRefreshRatesHz ?: listOf(60f)
+                val report = performanceModeController.applyFramePacing(mult, supportedRefreshRates = supportedHz)
                 _uiState.update {
                     it.copy(statusBannerMessage = report?.summary ?: "Frame pacing is turned off.")
                 }

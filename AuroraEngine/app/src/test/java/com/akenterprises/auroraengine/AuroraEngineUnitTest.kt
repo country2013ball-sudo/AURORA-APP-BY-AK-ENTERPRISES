@@ -4,7 +4,10 @@ import com.akenterprises.auroraengine.core.model.FrameGenMultiplier
 import com.akenterprises.auroraengine.core.model.PerformanceMode
 import com.akenterprises.auroraengine.core.model.ShizukuStatus
 import com.akenterprises.auroraengine.core.model.UpscalingMode
+import com.akenterprises.auroraengine.performance.highestSupportedRefreshRate
 import com.akenterprises.auroraengine.shizuku.parseGfxinfoFrameRate
+import com.akenterprises.auroraengine.shizuku.parseSettingsSnapshot
+import com.akenterprises.auroraengine.shizuku.parsePersistedSettingsSnapshot
 import org.junit.Assert.*
 import org.junit.Test
 
@@ -66,5 +69,38 @@ class AuroraEngineUnitTest {
 
         assertEquals(60f, requireNotNull(parseGfxinfoFrameRate(sample)), 0.1f)
         assertNull(parseGfxinfoFrameRate("no frame stats available"))
+    }
+
+    @Test
+    fun restoreSnapshotAcceptsCompleteNumericAndUnsetSettingsOnly() {
+        val output = """
+            global	window_animation_scale	0.5
+            global	transition_animation_scale	null
+            global	animator_duration_scale	0.7
+            system	peak_refresh_rate	90.0
+            system	min_refresh_rate	60.0
+        """.trimIndent()
+
+        assertEquals(5, parseSettingsSnapshot(output)?.size)
+        assertNull(parseSettingsSnapshot(output.lines().dropLast(1).joinToString("\n")))
+        assertNull(parseSettingsSnapshot(output.replace("90.0", "90.0; reboot")))
+        assertEquals(
+            parseSettingsSnapshot(output),
+            parsePersistedSettingsSnapshot(
+                "global:window_animation_scale\t0.5\n" +
+                    "global:transition_animation_scale\tnull\n" +
+                    "global:animator_duration_scale\t0.7\n" +
+                    "system:peak_refresh_rate\t90.0\n" +
+                    "system:min_refresh_rate\t60.0"
+            )
+        )
+    }
+
+    @Test
+    fun framePacingUsesHighestSupportedRefreshRateWithoutInventingOne() {
+        assertEquals(90f, requireNotNull(highestSupportedRefreshRate(listOf(60f, 90f))), 0f)
+        assertEquals(60f, requireNotNull(highestSupportedRefreshRate(listOf(60f, 144f))), 0f)
+        assertNull(highestSupportedRefreshRate(listOf(59.94f, 144f)))
+        assertNull(highestSupportedRefreshRate(emptyList()))
     }
 }
