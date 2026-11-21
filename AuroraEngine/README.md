@@ -80,7 +80,7 @@ On unrooted 4 GB RAM phones running Android 14+, two platform constraints can af
 If Android's Phantom Process Killer interrupts heavy compilation on your 4 GB RAM phone, the repository workflow (`.github/workflows/build-aurora-apk.yml`) builds APKs on pushes to `main`/`master`, pull requests to those branches, or when started manually. Tag a commit as `v*` to build a release APK and attach it to a GitHub Release with `.github/workflows/publish-aurora-release.yml`:
 1. Push this project to a GitHub repository where you can run Actions, or use the existing repository if you already have access.
 2. Open the **Actions** tab on GitHub (or open the repository in **GitHub Codespaces** in your mobile browser and run `./gradlew assembleDebug`).
-3. Open the completed workflow run, download the `aurora-engine-debug-apk` artifact, extract `app-debug.apk`, and tap it to install. The run also provides an `aurora-engine-release-apk` artifact.
+3. Open the completed workflow run, download the `aurora-engine-debug-apk` artifact, extract `app-debug.apk`, and tap it to install. The run also provides `aurora-engine-release-apk-debug-signed`, which is signed with the debug key for testing only. Version tags (`v*`) publish a debug-signed APK and SHA-256 checksum as GitHub Release assets; neither APK is signed for Play Store distribution.
 
 ## 4. Connecting Shizuku & Optimizing Roblox After Installation
 

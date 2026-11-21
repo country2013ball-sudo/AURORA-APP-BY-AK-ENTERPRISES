@@ -34,13 +34,31 @@ jobs:
         with:
           gradle-version: "8.5"
 
+      - name: Run unit tests and Android lint
+        working-directory: AuroraEngine
+        run: gradle testDebugUnitTest lintDebug --no-daemon --stacktrace
+
       - name: Build release APK
         working-directory: AuroraEngine
         run: gradle assembleRelease --no-daemon --stacktrace
+
+      - name: Prepare APK and SHA-256 checksum
+        id: prepare
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          apk_name="AuroraEngine-${RELEASE_TAG}-debug-signed.apk"
+          cp AuroraEngine/app/build/outputs/apk/release/app-release.apk "$apk_name"
+          sha256sum "$apk_name" > "${apk_name}.sha256"
+          echo "apk_name=$apk_name" >> "$GITHUB_OUTPUT"
 
       - name: Attach APK to GitHub Release
         uses: softprops/action-gh-release@v2
         with:
           generate_release_notes: true
-          files: AuroraEngine/app/build/outputs/apk/release/app-release.apk
+          body: |
+            **Signing notice:** This release-variant APK uses the repository's debug signing key and is intended for testing only. It is not signed for Play Store distribution.
+          files: |
+            ${{ steps.prepare.outputs.apk_name }}
+            ${{ steps.prepare.outputs.apk_name }}.sha256
           fail_on_unmatched_files: true
