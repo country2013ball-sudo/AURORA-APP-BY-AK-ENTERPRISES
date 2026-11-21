@@ -18,12 +18,6 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.withContext
-import rikka.shizuku.Shizuku
-import java.io.InputStreamReader
-import java.util.concurrent.CompletableFuture
-import java.util.concurrent.ExecutionException
-import java.util.concurrent.TimeUnit
-import java.util.concurrent.TimeoutException
 
 /**
  * Executes allowlisted Shizuku operations. Profile changes use the shared
@@ -34,6 +28,9 @@ class ShizukuCommandEngine(
     context: Context
 ) : ProfileCommandExecutor {
     private val appContext = context.applicationContext
+    private val shellExecutor = ShizukuShellExecutor(
+        processFactory = ShizukuShellExecutor.shizukuFactory()
+    )
     val profileApplicationService: ProfileApplicationService by lazy {
         ProfileApplicationService(
             executor = this,
@@ -406,69 +403,16 @@ class ShizukuCommandEngine(
         timeoutSec: Long,
         maxOutputChars: Int = 600
     ): Triple<Int, String, String> {
-        return try {
-            val method = Shizuku::class.java.getDeclaredMethod(
-                "newProcess",
-                Array<String>::class.java,
-                Array<String>::class.java,
-                String::class.java
-            )
-            method.isAccessible = true
-            val process = method.invoke(null, tokens.toTypedArray(), null, null) as Process
-            val stdoutFuture = CompletableFuture.supplyAsync {
-                readBoundedStream(process.inputStream, maxOutputChars, keepLast = maxOutputChars > 600)
-            }
-            val stderrFuture = CompletableFuture.supplyAsync {
-                readBoundedStream(process.errorStream, 600, keepLast = false)
-            }
-
-            val finished = process.waitFor(timeoutSec, TimeUnit.SECONDS)
-            if (!finished) {
-                process.destroyForcibly()
-                stdoutFuture.cancel(true)
-                stderrFuture.cancel(true)
-                return Triple(-1, "", "Command timed out after ${timeoutSec}s")
-            }
-
-            val stdout = stdoutFuture.get(1L, TimeUnit.SECONDS).trim()
-            val stderr = stderrFuture.get(1L, TimeUnit.SECONDS).trim()
-            Triple(process.exitValue(), stdout, stderr)
-        } catch (e: InterruptedException) {
-            Thread.currentThread().interrupt()
-            Triple(-1, "", "Shizuku execution interrupted: ${e.message ?: "interrupted"}")
-        } catch (e: ExecutionException) {
-            Triple(-1, "", "Shizuku output read failed: ${e.cause?.message ?: e.message}")
-        } catch (e: TimeoutException) {
-            Triple(-1, "", "Timed out while reading Shizuku command output.")
-        } catch (e: ReflectiveOperationException) {
-            Triple(-1, "", "Shizuku process creation failed: ${e.message ?: e.javaClass.simpleName}")
-        } catch (e: RuntimeException) {
-            Triple(-1, "", "Shizuku execution error: ${e.javaClass.simpleName}: ${e.message}")
+        val result = shellExecutor.execute(
+            tokens = tokens,
+            timeoutSeconds = timeoutSec,
+            maxStdoutChars = maxOutputChars
+        )
+        val exitCode = result.exitCode ?: if (result.timedOut) -1 else -1
+        val stderr = result.stderr.ifBlank {
+            result.errorMessage ?: if (result.timedOut) "Command timed out." else ""
         }
-    }
-
-    private fun readBoundedStream(
-        stream: java.io.InputStream,
-        maxChars: Int,
-        keepLast: Boolean
-    ): String {
-        val result = StringBuilder(maxChars.coerceAtMost(4096))
-        val buffer = CharArray(2048)
-        InputStreamReader(stream).use { reader ->
-            while (true) {
-                val count = reader.read(buffer)
-                if (count < 0) break
-                if (keepLast) {
-                    result.append(buffer, 0, count)
-                    if (result.length > maxChars) {
-                        result.delete(0, result.length - maxChars)
-                    }
-                } else if (result.length < maxChars) {
-                    result.append(buffer, 0, minOf(count, maxChars - result.length))
-                }
-            }
-        }
-        return result.toString()
+        return Triple(exitCode, result.stdout, stderr)
     }
 
     private fun recordFailure(
