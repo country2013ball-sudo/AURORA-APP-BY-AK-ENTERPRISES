@@ -36,6 +36,7 @@ import androidx.compose.ui.unit.sp
 import com.akenterprises.auroraengine.core.model.*
 import com.akenterprises.auroraengine.framegeneration.FrameGenerationService
 import com.akenterprises.auroraengine.graphics.NativeFrameProcessor
+import com.akenterprises.auroraengine.performance.DiagnosticLevel
 import com.akenterprises.auroraengine.ui.AuroraUiState
 import com.akenterprises.auroraengine.ui.AuroraViewModel
 import com.akenterprises.auroraengine.ui.animation.AuroraSplashIntro
@@ -781,20 +782,21 @@ private fun PerformancePanelContent(
         fontWeight = FontWeight.SemiBold
     )
     Text(
-        text = "Dynamically detected hardware panel modes (Current: ${state.hardwareProfile?.currentRefreshRateHz?.toInt() ?: 60} Hz)",
+        text = "Dynamically detected panel modes (Current: ${state.hardwareProfile?.currentRefreshRateHz?.takeIf { it > 0f }?.toInt()?.let { \"$it Hz\" } ?: \"unavailable\"})",
         color = Color(0xFF7D8796),
         fontSize = 11.sp
     )
     Spacer(modifier = Modifier.height(8.dp))
 
-    val rates = state.hardwareProfile?.supportedRefreshRatesHz ?: listOf(60f, 90f, 120f)
+    val rates = state.hardwareProfile?.supportedRefreshRatesHz.orEmpty()
+    val currentHz = state.hardwareProfile?.currentRefreshRateHz ?: 0f
     Row(
         modifier = Modifier.fillMaxWidth(),
         horizontalArrangement = Arrangement.spacedBy(8.dp)
     ) {
         listOf(60f, 90f, 120f).forEach { hz ->
             val isSupported = rates.any { kotlin.math.abs(it - hz) < 2f }
-            val isCurrent = kotlin.math.abs((state.hardwareProfile?.currentRefreshRateHz ?: 60f) - hz) < 2f
+            val isCurrent = currentHz > 0f && kotlin.math.abs(currentHz - hz) < 2f
             Box(
                 modifier = Modifier
                     .weight(1f)
@@ -1257,6 +1259,63 @@ private fun ShizukuCenterContent(
             OutlinedButton(onClick = onRefresh, modifier = Modifier.weight(1f)) {
                 Text("Refresh Status", color = accentColor, fontSize = 11.sp)
             }
+        }
+    }
+
+    Spacer(modifier = Modifier.height(12.dp))
+    InfoCard(
+        title = "Global Profile Diagnostics",
+        subtitle = "Shared Shizuku checks and per-setting results for Battery, Balanced, and Performance profiles.",
+        accentColor = accentColor
+    ) {
+        val diagnostics = state.profileDiagnostics
+        val checks = listOf(
+            "SHIZUKU SERVICE" to diagnostics.shizukuService,
+            "SHIZUKU AUTHORIZATION" to diagnostics.shizukuAuthorization,
+            "SHELL EXECUTION" to diagnostics.shellExecution,
+            "SYSTEM SETTINGS READ" to diagnostics.systemSettingsRead,
+            "SETTINGS BACKUP" to diagnostics.settingsBackup,
+            "BATTERY PROFILE" to diagnostics.batteryProfile,
+            "BALANCED PROFILE" to diagnostics.balancedProfile,
+            "PERFORMANCE PROFILE" to diagnostics.performanceProfile
+        )
+        checks.forEach { (label, check) ->
+            Row(
+                modifier = Modifier.fillMaxWidth().padding(vertical = 3.dp),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.Top
+            ) {
+                Text(label, color = Color(0xFFCFD6E0), fontSize = 10.sp, modifier = Modifier.weight(1f))
+                Text(
+                    check.level.name,
+                    color = when (check.level) {
+                        DiagnosticLevel.PASS -> Color(0xFF84CC16)
+                        DiagnosticLevel.PARTIAL -> Color(0xFFFFC107)
+                        DiagnosticLevel.FAIL -> MainAccentRed
+                    },
+                    fontSize = 10.sp,
+                    fontWeight = FontWeight.Bold
+                )
+            }
+            Text(
+                check.detail.take(180) + (check.exitCode?.let { " (exit $it)" } ?: ""),
+                color = Color(0xFF8A94A6),
+                fontSize = 9.sp
+            )
+        }
+        diagnostics.failedOperation?.let { failed ->
+            Spacer(modifier = Modifier.height(4.dp))
+            Text("Failed operation: ${failed.take(160)}", color = MainAccentRed, fontSize = 10.sp)
+        }
+        diagnostics.operations.takeLast(8).asReversed().forEach { operation ->
+            Text(
+                "${operation.name}: ${operation.level.name}" +
+                    (operation.exitCode?.let { " (exit $it)" } ?: "") +
+                    " — ${operation.detail.take(120)}",
+                color = if (operation.level == DiagnosticLevel.FAIL) MainAccentRed else Color(0xFF8A94A6),
+                fontSize = 9.sp,
+                modifier = Modifier.padding(top = 3.dp)
+            )
         }
     }
 

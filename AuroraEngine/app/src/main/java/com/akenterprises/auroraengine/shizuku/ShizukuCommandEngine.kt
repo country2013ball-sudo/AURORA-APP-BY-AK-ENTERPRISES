@@ -1,10 +1,18 @@
 package com.akenterprises.auroraengine.shizuku
 
 import android.content.Context
-import android.content.SharedPreferences
 import android.os.Build
 import com.akenterprises.auroraengine.core.model.CommandExecutionRecord
 import com.akenterprises.auroraengine.core.model.PerformanceMode
+import com.akenterprises.auroraengine.performance.DiagnosticLevel
+import com.akenterprises.auroraengine.performance.ProfileCheck
+import com.akenterprises.auroraengine.performance.ProfileCommandExecutor
+import com.akenterprises.auroraengine.performance.ProfileSettingRead
+import com.akenterprises.auroraengine.performance.ProfileShellResult
+import com.akenterprises.auroraengine.performance.ProfileApplicationService
+import com.akenterprises.auroraengine.performance.SharedPreferencesProfileSettingsBackupStore
+import com.akenterprises.auroraengine.performance.ShizukuValidation
+import com.akenterprises.auroraengine.performance.parseProfileSettingRead
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -12,35 +20,27 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.withContext
 import rikka.shizuku.Shizuku
 import java.io.InputStreamReader
-import java.util.Locale
 import java.util.concurrent.CompletableFuture
+import java.util.concurrent.ExecutionException
 import java.util.concurrent.TimeUnit
-
-private const val SETTINGS_SNAPSHOT_KEY = "profile_settings_snapshot"
-private val RESTORABLE_SETTINGS = listOf(
-    "global:window_animation_scale",
-    "global:transition_animation_scale",
-    "global:animator_duration_scale",
-    "system:peak_refresh_rate",
-    "system:min_refresh_rate"
-)
+import java.util.concurrent.TimeoutException
 
 /**
- * V2 Ultra-Fast Batched Shizuku Command Engine.
- *
- * Key V2 Performance Improvements over V1:
- * 1. Executes entire mode transitions in ONE single `/system/bin/sh -c` binder process instead
- *    of spawning 6-10 separate processes (eliminates startup & mode-switch lag completely).
- * 2. Integrates Android hardware optimizations for Roblox (`com.roblox.client`):
- *    - Android 12+ GameManager intervention & hardware surface downscaling (`cmd game downscale`)
- *    - Fixed performance power hint (`cmd power set-fixed-performance-mode-enabled`)
- *    - Display peak & floor refresh rate lock (`120.0` / `90.0` / `60.0`)
- *    - Batched animation and refresh-rate settings
+ * Executes allowlisted Shizuku operations. Profile changes use the shared
+ * [ProfileApplicationService] transaction for per-setting backup and verification.
  */
 class ShizukuCommandEngine(
     private val connectionManager: ShizukuConnectionManager,
     context: Context
-) {
+) : ProfileCommandExecutor {
+    private val appContext = context.applicationContext
+    val profileApplicationService: ProfileApplicationService by lazy {
+        ProfileApplicationService(
+            executor = this,
+            backups = SharedPreferencesProfileSettingsBackupStore(appContext),
+            sdkInt = Build.VERSION.SDK_INT
+        )
+    }
 
     data class WhitelistedSpec(
         val id: String,
@@ -56,11 +56,6 @@ class ShizukuCommandEngine(
 
     private val _executionHistory = MutableStateFlow<List<CommandExecutionRecord>>(emptyList())
     val executionHistory: StateFlow<List<CommandExecutionRecord>> = _executionHistory.asStateFlow()
-
-    private val restorePrefs: SharedPreferences =
-        context.getSharedPreferences("aurora_system_restore", Context.MODE_PRIVATE)
-
-    private val settingsToRestore = RESTORABLE_SETTINGS
 
     private val whitelist: Map<String, WhitelistedSpec> = mapOf(
         "window_anim_scale" to WhitelistedSpec(
@@ -154,109 +149,155 @@ class ShizukuCommandEngine(
         )
     )
 
-    /**
-     * Executes an entire Performance Mode + Hardware Frame Pacing & Upscaling profile in a
-     * SINGLE batched `/system/bin/sh -c` call so there is ZERO binder/process spawn lag!
-     */
+    override suspend fun validateShizukuAndShell(): ShizukuValidation = withContext(Dispatchers.IO) {
+            val status = connectionManager.refreshStatus()
+            val serviceCheck = when {
+                !status.isInstalled -> ProfileCheck(DiagnosticLevel.FAIL, "Shizuku is not installed.")
+                !status.isRunning -> ProfileCheck(DiagnosticLevel.FAIL, "Shizuku Binder service is not running.")
+                else -> ProfileCheck(DiagnosticLevel.PASS, "Shizuku Binder service is reachable.")
+            }
+            val authorizationCheck = if (!status.canExecutePrivileged) {
+                ProfileCheck(DiagnosticLevel.FAIL, "Shizuku shell permission is not authorized.")
+            } else {
+                ProfileCheck(DiagnosticLevel.PASS, "Shizuku shell permission is granted.")
+            }
+            if (serviceCheck.level != DiagnosticLevel.PASS ||
+                authorizationCheck.level != DiagnosticLevel.PASS
+            ) {
+                return@withContext ShizukuValidation(
+                    serviceCheck,
+                    authorizationCheck,
+                    ProfileCheck(DiagnosticLevel.FAIL, "Shell probe not run.")
+                )
+            }
+
+            val probe = runShizukuProcess(
+                listOf("/system/bin/sh", "-c", "printf AURORA_PROFILE_SHELL_OK"),
+                timeoutSec = 3L
+            )
+            val shellCheck = if (probe.first == 0 && probe.second == "AURORA_PROFILE_SHELL_OK") {
+                ProfileCheck(DiagnosticLevel.PASS, "Authorized Shizuku shell executed the probe.", probe.first)
+            } else {
+                ProfileCheck(
+                    DiagnosticLevel.FAIL,
+                    probe.third.ifBlank { probe.second.ifBlank { "Shizuku shell probe failed." } },
+                    probe.first
+                )
+            }
+            ShizukuValidation(serviceCheck, authorizationCheck, shellCheck)
+        }
+
+        override suspend fun readSystemSetting(namespace: String, key: String): ProfileSettingRead =
+            withContext(Dispatchers.IO) {
+                if (!isValidSetting(namespace, key)) {
+                    return@withContext ProfileSettingRead(
+                        successful = false,
+                        detail = "Unsupported settings namespace or key."
+                    )
+                }
+                val script = """
+                    value=`settings get $namespace $key 2>&1`
+                    status=$?
+                    if [ "${'$'}status" -ne 0 ]; then
+                        printf 'AURORA_READ_ERROR:%s:%s\n' "${'$'}status" "${'$'}value"
+                        exit "${'$'}status"
+                    fi
+                    if [ "${'$'}value" = "null" ]; then
+                        printf 'AURORA_UNSET'
+                    else
+                        printf 'AURORA_SET_BEGIN\n%s\nAURORA_SET_END' "${'$'}value"
+                    fi
+                """.trimIndent()
+                val result = runShizukuProcess(
+                    listOf("/system/bin/sh", "-c", script),
+                    timeoutSec = 3L
+                )
+                parseProfileSettingRead(result.second, result.first, result.third)
+            }
+
+        override suspend fun writeSystemSetting(
+            namespace: String,
+            key: String,
+            value: String?
+        ): ProfileShellResult = withContext(Dispatchers.IO) {
+            if (!isValidSetting(namespace, key) ||
+                (value != null && value.isNotEmpty() && !value.matches(Regex("""\d+(?:\.\d+)?""")))
+            ) {
+                return@withContext ProfileShellResult(-1, stderr = "Rejected invalid setting write.")
+            }
+            val command = if (value == null) {
+                listOf("settings", "delete", namespace, key)
+            } else {
+                listOf("settings", "put", namespace, key, value)
+            }
+            val result = runShizukuProcess(command, timeoutSec = 4L)
+            ProfileShellResult(result.first, result.second, result.third)
+        }
+
+        override suspend fun executeOptionalProfileCommand(
+            commandId: String,
+            argument: String
+        ): ProfileShellResult = withContext(Dispatchers.IO) {
+            val command = when (commandId) {
+                "game_mode" -> {
+                    val mode = argument.takeIf { it in setOf("1", "2", "3") }
+                        ?: return@withContext ProfileShellResult(-1, stderr = "Unsupported GameManager mode.")
+                    listOf("cmd", "game", "mode", mode, "com.roblox.client")
+                }
+                "hardware_downscale" -> {
+                    val factor = argument.takeIf { it in setOf("disable", "0.9", "0.85", "0.8", "0.75", "0.7") }
+                        ?: return@withContext ProfileShellResult(-1, stderr = "Unsupported GameManager downscale.")
+                    listOf("cmd", "game", "downscale", factor, "com.roblox.client")
+                }
+                "fixed_performance_mode" -> {
+                    val enabled = argument.takeIf { it == "true" || it == "false" }
+                        ?: return@withContext ProfileShellResult(-1, stderr = "Invalid fixed-performance flag.")
+                    listOf("cmd", "power", "set-fixed-performance-mode-enabled", enabled)
+                }
+                else -> return@withContext ProfileShellResult(-1, stderr = "Unsupported optional operation: $commandId")
+            }
+            val result = runShizukuProcess(command, timeoutSec = 4L)
+            ProfileShellResult(result.first, result.second, result.third)
+        }
+
+    private fun isValidSetting(namespace: String, key: String): Boolean =
+        namespace in setOf("global", "system") &&
+            key.matches(Regex("""[a-zA-Z0-9_]+"""))
+
+    /** Compatibility entry point routed through the shared verified profile transaction. */
     suspend fun executeBatchedGamingProfile(
         mode: PerformanceMode,
         targetHz: Float,
         lockMinRefresh: Boolean,
         downscaleFactor: String,
         enableFixedPerfHint: Boolean
-    ): CommandExecutionRecord = withContext(Dispatchers.IO) {
-        val status = connectionManager.refreshStatus()
-        if (!status.canExecutePrivileged) {
-            return@withContext recordFailure(
-                name = "Batched ${mode.title} Profile",
-                purpose = "Applies all Shizuku gaming optimizations in a single non-blocking shell call.",
-                cmd = "sh -c <batched_profile>",
-                perm = "Shizuku ADB (UID 2000)",
-                versions = "Android 8.0+",
-                stderr = "Blocked: Authorize Shizuku first."
-            )
-        }
-
-        if (targetHz !in setOf(60f, 90f, 120f)) {
-            return@withContext recordFailure(
-                name = "Batched ${mode.title} Profile",
-                purpose = "Applies a validated Android gaming profile in one Shizuku shell process.",
-                cmd = "sh -c <batched_profile>",
-                perm = "Shizuku ADB (UID 2000)",
-                versions = "Android 8.0+",
-                stderr = "Blocked: Unsupported refresh-rate target '$targetHz'."
-            )
-        }
-
-        val scale = mode.windowAnimationScale.toString()
-        val hzStr = String.format(Locale.US, "%.1f", targetHz)
-        val minHzStr = if (lockMinRefresh) hzStr else "60.0"
-        val gameModeNum = when (mode) {
-            PerformanceMode.BATTERY -> "3"
-            PerformanceMode.BALANCED -> "1"
-            PerformanceMode.PERFORMANCE -> "2"
-        }
-        val fixedPerf = if (enableFixedPerfHint && mode == PerformanceMode.PERFORMANCE) "true" else "false"
-        if (downscaleFactor !in setOf("disable", "0.9", "0.85", "0.8", "0.75", "0.7")) {
-            return@withContext recordFailure(
-                name = "Batched ${mode.title} Profile",
-                purpose = "Applies a validated Android gaming profile in one Shizuku shell process.",
-                cmd = "sh -c <batched_profile>",
-                perm = "Shizuku ADB (UID 2000)",
-                versions = "Android 8.0+",
-                stderr = "Blocked: Unsupported hardware downscale value '$downscaleFactor'."
-            )
-        }
-        val safeDownscale = downscaleFactor
-
-        if (!captureSettingsSnapshotIfNeeded()) {
-            return@withContext recordFailure(
-                name = "Batched ${mode.title} Profile",
-                purpose = "Saves the current animation and refresh-rate settings so they can be restored later.",
-                cmd = "settings get <profile_settings>",
-                perm = "Shizuku ADB (UID 2000)",
-                versions = "Android 8.0+",
-                stderr = "The current system settings could not be read and saved; no profile changes were applied."
-            )
-        }
-
-        val commands = mutableListOf(
-            "settings put global window_animation_scale $scale",
-            "settings put global transition_animation_scale $scale",
-            "settings put global animator_duration_scale $scale",
-            "settings put system peak_refresh_rate $hzStr",
-            "settings put system min_refresh_rate $minHzStr"
+    ): CommandExecutionRecord {
+        val result = profileApplicationService.apply(
+            mode = mode,
+            supportedRefreshRates = listOf(targetHz),
+            targetRefreshRate = targetHz,
+            downscaleFactor = downscaleFactor,
+            enableFixedPerformanceHint = enableFixedPerfHint
         )
-        if (Build.VERSION.SDK_INT >= 31) {
-            commands += "cmd game mode $gameModeNum com.roblox.client"
-            commands += "cmd game downscale $safeDownscale com.roblox.client"
-        }
-        if (Build.VERSION.SDK_INT >= 29) {
-            commands += "cmd power set-fixed-performance-mode-enabled $fixedPerf"
-        }
-
-        val batchedCmd = buildString {
-            append("failures=0\n")
-            append("run_cmd() { \"\$@\" >/dev/null 2>&1 || { printf 'FAILED: %s\\n' \"\$*\"; failures=1; }; }\n")
-            commands.forEach { append("run_cmd $it\n") }
-            append("if [ \"\$failures\" -eq 0 ]; then printf 'BATCH_OK\\n'; fi\n")
-            append("exit \"\$failures\"")
-        }
-        val raw = runShizukuProcess(listOf("/system/bin/sh", "-c", batchedCmd), 8L)
-
-        val rec = CommandExecutionRecord(
-            optimizationName = "Batched ${mode.title} Profile",
-            purpose = "Single-shot execution of Animation Scales ($scale), Refresh Lock ($hzStr Hz), GameManager Mode ($gameModeNum), Hardware Downscale ($safeDownscale), and Fixed Performance Hint ($fixedPerf).",
-            command = batchedCmd,
+        val operation = result.operations.lastOrNull { it.required && it.level != DiagnosticLevel.PASS }
+        val record = CommandExecutionRecord(
+            optimizationName = "${mode.title} Profile Transaction",
+            purpose = "Per-setting backup, apply, verification, and rollback transaction.",
+            command = operation?.name ?: "profile transaction",
             requiredPermission = "Shizuku ADB Shell (UID 2000)",
-            supportedAndroidVersions = "Android 8.0–16+",
-            exitCode = raw.first,
-            stdout = raw.second,
-            stderr = raw.third,
-            rollbackCommand = "settings put global window_animation_scale 1.0; settings put global transition_animation_scale 1.0; settings put global animator_duration_scale 1.0; settings put system min_refresh_rate 60.0; cmd game mode 1 com.roblox.client; cmd game downscale disable com.roblox.client; cmd power set-fixed-performance-mode-enabled false"
+            supportedAndroidVersions = "Android 8.0+",
+            exitCode = if (result.activated) 0 else operation?.exitCode ?: -1,
+            stdout = result.summary,
+            stderr = if (result.activated) {
+                result.operations.filter { it.level != DiagnosticLevel.PASS }
+                    .joinToString("; ") { "${it.name}: ${it.detail}" }
+            } else {
+                result.summary
+            },
+            rollbackCommand = "ProfileApplicationService.restoreAll()"
         )
-        appendRecord(rec)
-        rec
+        appendRecord(record)
+        return record
     }
 
     suspend fun executeWhitelisted(
@@ -327,115 +368,37 @@ class ShizukuCommandEngine(
         parseGfxinfoFrameRate(result.second)
     }
 
-    suspend fun rollbackAllReversibleChanges(): List<CommandExecutionRecord> = withContext(Dispatchers.IO) {
-        val status = connectionManager.refreshStatus()
-        if (!status.canExecutePrivileged) {
-            return@withContext listOf(
-                recordFailure(
-                    name = "Full System Rollback",
-                    purpose = "Restores Aurora Engine system settings to their documented defaults.",
-                    cmd = "sh -c <rollback_profile>",
-                    perm = "Shizuku ADB (UID 2000)",
-                    versions = "Android 8.0+",
-                    stderr = "Rollback was not run because Shizuku authorization is not active."
+    suspend fun rollbackAllReversibleChanges(): List<CommandExecutionRecord> {
+        val operations = profileApplicationService.restoreAll()
+        return operations.map { operation ->
+            val record = CommandExecutionRecord(
+                optimizationName = operation.name,
+                purpose = "Global profile transaction restore.",
+                command = operation.name,
+                requiredPermission = "Shizuku ADB Shell (UID 2000)",
+                supportedAndroidVersions = "Android 8.0+",
+                exitCode = operation.exitCode ?: if (operation.level == DiagnosticLevel.PASS) 0 else -1,
+                stdout = if (operation.level == DiagnosticLevel.PASS) operation.detail else "",
+                stderr = if (operation.level == DiagnosticLevel.PASS) "" else operation.detail,
+                rollbackCommand = null
+            )
+            appendRecord(record)
+            record
+        }.ifEmpty {
+            listOf(
+                CommandExecutionRecord(
+                    optimizationName = "Profile Restore",
+                    purpose = "No saved profile settings were available.",
+                    command = "No-op",
+                    requiredPermission = "Shizuku ADB Shell (UID 2000)",
+                    supportedAndroidVersions = "Android 8.0+",
+                    exitCode = 0,
+                    stdout = "No saved profile settings.",
+                    stderr = "",
+                    rollbackCommand = null
                 )
             )
         }
-        val hasSavedSnapshot = restorePrefs.contains(SETTINGS_SNAPSHOT_KEY)
-        val savedSettings = loadSettingsSnapshot()
-        if (hasSavedSnapshot && savedSettings == null) {
-            return@withContext listOf(
-                recordFailure(
-                    name = "Full System Rollback",
-                    purpose = "Restores the saved animation and refresh-rate settings.",
-                    cmd = "sh -c <rollback_profile>",
-                    perm = "Shizuku ADB Shell (UID 2000)",
-                    versions = "Android 8.0+",
-                    stderr = "The saved settings snapshot is invalid; no system values were changed."
-                )
-            )
-        }
-        val commands = if (savedSettings != null) {
-            savedSettings.map { (setting, value) ->
-                val (namespace, key) = setting.split(':', limit = 2)
-                if (value == "null") {
-                    "settings delete $namespace $key"
-                } else {
-                    "settings put $namespace $key $value"
-                }
-            }.toMutableList()
-        } else {
-            mutableListOf(
-                "settings put global window_animation_scale 1.0",
-                "settings put global transition_animation_scale 1.0",
-                "settings put global animator_duration_scale 1.0",
-                "settings put system min_refresh_rate 60.0",
-                "settings put system peak_refresh_rate 90.0"
-            )
-        }
-        if (Build.VERSION.SDK_INT >= 31) {
-            commands += "cmd game mode 1 com.roblox.client"
-            commands += "cmd game downscale disable com.roblox.client"
-        }
-        if (Build.VERSION.SDK_INT >= 29) {
-            commands += "cmd power set-fixed-performance-mode-enabled false"
-        }
-        val restoreCmd = buildString {
-            append("failures=0\n")
-            append("run_cmd() { \"\$@\" >/dev/null 2>&1 || { printf 'FAILED: %s\\n' \"\$*\"; failures=1; }; }\n")
-            commands.forEach { append("run_cmd $it\n") }
-            append("if [ \"\$failures\" -eq 0 ]; then printf 'ALL_RESTORED\\n'; fi\n")
-            append("exit \"\$failures\"")
-        }
-
-        val raw = runShizukuProcess(listOf("/system/bin/sh", "-c", restoreCmd), 8L)
-        val rec = CommandExecutionRecord(
-            optimizationName = "Full System Rollback",
-            purpose = if (savedSettings != null) {
-                "Restores saved animation and refresh-rate settings, plus Aurora GameManager and power overrides."
-            } else {
-                "No saved settings snapshot was available; restores legacy fallback defaults and Aurora GameManager and power overrides."
-            },
-            command = restoreCmd,
-            requiredPermission = "Shizuku ADB Shell (UID 2000)",
-            supportedAndroidVersions = "Android 8.0+",
-            exitCode = raw.first,
-            stdout = raw.second,
-            stderr = raw.third,
-            rollbackCommand = null
-        )
-        appendRecord(rec)
-        if (raw.first == 0 && raw.second.contains("ALL_RESTORED")) {
-            restorePrefs.edit().remove(SETTINGS_SNAPSHOT_KEY).commit()
-        }
-        listOf(rec)
-    }
-
-    private fun captureSettingsSnapshotIfNeeded(): Boolean {
-        if (restorePrefs.contains(SETTINGS_SNAPSHOT_KEY)) return loadSettingsSnapshot() != null
-
-        val script = buildString {
-            append("set -e\n")
-            settingsToRestore.forEach { setting ->
-                val (namespace, key) = setting.split(':', limit = 2)
-                append("value=\$(settings get $namespace $key)\n")
-                append("printf '%s\\t%s\\t%s\\n' '$namespace' '$key' \"\$value\"\n")
-            }
-        }
-        val result = runShizukuProcess(
-            listOf("/system/bin/sh", "-c", script),
-            timeoutSec = 5L
-        )
-        if (result.first != 0) return false
-        val snapshot = parseSettingsSnapshot(result.second) ?: return false
-        if (snapshot.keys != settingsToRestore.toSet()) return false
-        val serialized = snapshot.entries.joinToString("\n") { (key, value) -> "$key\t$value" }
-        return restorePrefs.edit().putString(SETTINGS_SNAPSHOT_KEY, serialized).commit()
-    }
-
-    private fun loadSettingsSnapshot(): Map<String, String>? {
-        val serialized = restorePrefs.getString(SETTINGS_SNAPSHOT_KEY, null) ?: return null
-        return parsePersistedSettingsSnapshot(serialized)
     }
 
     private fun runShizukuProcess(
@@ -470,8 +433,17 @@ class ShizukuCommandEngine(
             val stdout = stdoutFuture.get(1L, TimeUnit.SECONDS).trim()
             val stderr = stderrFuture.get(1L, TimeUnit.SECONDS).trim()
             Triple(process.exitValue(), stdout, stderr)
-        } catch (t: Throwable) {
-            Triple(-1, "", "Shizuku execution error: ${t.javaClass.simpleName}: ${t.message}")
+        } catch (e: InterruptedException) {
+            Thread.currentThread().interrupt()
+            Triple(-1, "", "Shizuku execution interrupted: ${e.message ?: "interrupted"}")
+        } catch (e: ExecutionException) {
+            Triple(-1, "", "Shizuku output read failed: ${e.cause?.message ?: e.message}")
+        } catch (e: TimeoutException) {
+            Triple(-1, "", "Timed out while reading Shizuku command output.")
+        } catch (e: ReflectiveOperationException) {
+            Triple(-1, "", "Shizuku process creation failed: ${e.message ?: e.javaClass.simpleName}")
+        } catch (e: RuntimeException) {
+            Triple(-1, "", "Shizuku execution error: ${e.javaClass.simpleName}: ${e.message}")
         }
     }
 
@@ -526,32 +498,6 @@ class ShizukuCommandEngine(
         val updated = (listOf(record) + _executionHistory.value).take(30)
         _executionHistory.value = updated
     }
-}
-
-internal fun parseSettingsSnapshot(output: String): Map<String, String>? {
-    val snapshot = output.lineSequence().mapNotNull { line ->
-        val parts = line.split('\t', limit = 3)
-        if (parts.size != 3) return@mapNotNull null
-        "${parts[0]}:${parts[1]}" to parts[2].trim()
-    }.toMap()
-    if (snapshot.keys != RESTORABLE_SETTINGS.toSet()) return null
-    if (snapshot.values.any { it != "null" && !it.matches(Regex("""\d+(?:\.\d+)?""")) }) {
-        return null
-    }
-    return snapshot
-}
-
-internal fun parsePersistedSettingsSnapshot(serialized: String): Map<String, String>? {
-    val snapshot = serialized.lineSequence().mapNotNull { line ->
-        val separator = line.indexOf('\t')
-        if (separator <= 0) return@mapNotNull null
-        line.substring(0, separator) to line.substring(separator + 1)
-    }.toMap()
-    if (snapshot.keys != RESTORABLE_SETTINGS.toSet()) return null
-    if (snapshot.values.any { it != "null" && !it.matches(Regex("""\d+(?:\.\d+)?""")) }) {
-        return null
-    }
-    return snapshot
 }
 
 internal fun parseGfxinfoFrameRate(output: String): Float? {

@@ -90,7 +90,7 @@ class RobloxOptimizationEngine(
         supportedRefreshRates: List<Float>,
         launchRobloxApp: Boolean
     ): RobloxSessionStatus {
-        // 1. Safe local memory cleanup; profile execution below batches all Shizuku commands.
+        // 1. Safe local memory cleanup before the verified Shizuku profile transaction.
         safeRamManager.performSafeMemoryOptimization(includeShizukuTrim = false)
 
         // 2. Single batched Shizuku profile execution
@@ -99,9 +99,12 @@ class RobloxOptimizationEngine(
             supportedRefreshRates = supportedRefreshRates
         )
 
-        activeSession = true
+        activeSession = modeReport.activated
         appliedCount = modeReport.records.count { it.isSuccess }
         sessionNotice = modeReport.summary
+        if (!modeReport.activated) {
+            return inspectRobloxStatus()
+        }
 
         // 3. Auto-launch In-Game Floating Mini Edge-Panel if overlay permission is granted
         if (android.provider.Settings.canDrawOverlays(context) && !EdgePanelOverlayService.isOverlayRunning) {
@@ -129,12 +132,17 @@ class RobloxOptimizationEngine(
         activeSession = false
         appliedCount = 0
         val rollbackRecords = shizukuCommandEngine.rollbackAllReversibleChanges()
-        val failures = rollbackRecords.filterNot { it.isSuccess }
+        val noSettingsBackup = rollbackRecords.any {
+            it.optimizationName == "Restore saved profile settings"
+        }
+        val failures = rollbackRecords.filterNot {
+            it.isSuccess || it.optimizationName == "Restore saved profile settings"
+        }
         sessionNotice = when {
             failures.isNotEmpty() ->
                 failures.joinToString(prefix = "Rollback incomplete: ") { it.stderr.ifBlank { it.stdout } }
-            rollbackRecords.any { it.purpose.contains("No saved settings snapshot") } ->
-                "No saved settings snapshot was available; legacy fallback values were applied."
+            noSettingsBackup ->
+                "No verified profile settings backup was available to restore; optional game and power overrides were reset where supported."
             else ->
                 "Saved animation and refresh-rate settings restored; game and power overrides returned to defaults."
         }
