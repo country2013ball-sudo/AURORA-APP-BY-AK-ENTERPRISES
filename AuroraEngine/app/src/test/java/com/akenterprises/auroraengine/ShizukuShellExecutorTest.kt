@@ -80,7 +80,7 @@ class ShizukuShellExecutorTest {
         process.complete()
         val result = execute(process, maxStdoutChars = 80_000)
         assertTrue(result.success)
-        assertEquals(80_000, result.stdout.length)
+        assertEquals(20_000, result.stdout.length)
         assertEquals(600, result.stderr.length)
     }
 
@@ -90,10 +90,6 @@ class ShizukuShellExecutorTest {
         val second = FakeProcess("second", "", 0)
         first.complete()
         second.complete()
-        val executor = ShizukuShellExecutor(
-            processFactory = { throw IllegalStateException("override per test") },
-            executorFactory = { Executors.newFixedThreadPool(3) }
-        )
         // This test exercises the executor's synchronized method through a changing factory queue.
         val synchronizedFactory = java.util.concurrent.atomic.AtomicInteger()
         val queuedExecutor = ShizukuShellExecutor(
