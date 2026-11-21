@@ -11,6 +11,8 @@ import com.akenterprises.auroraengine.framegeneration.FrameGenerationService
 import com.akenterprises.auroraengine.graphics.NativeFrameProcessor
 import com.akenterprises.auroraengine.monitoring.HardwareTelemetryMonitor
 import com.akenterprises.auroraengine.performance.PerformanceModeController
+import com.akenterprises.auroraengine.performance.ProfileApplicationService
+import com.akenterprises.auroraengine.performance.ProfileDiagnostics
 import com.akenterprises.auroraengine.rammanager.SafeRamManager
 import com.akenterprises.auroraengine.roblox.RobloxOptimizationEngine
 import com.akenterprises.auroraengine.shizuku.ShizukuCommandEngine
@@ -55,7 +57,8 @@ data class AuroraUiState(
     val isOverlayServiceActive: Boolean = false,
     val canWriteSystemSettings: Boolean = false,
     val systemApplyProgress: Float? = null,
-    val isControlShadeActive: Boolean = false
+    val isControlShadeActive: Boolean = false,
+    val profileDiagnostics: ProfileDiagnostics = ProfileDiagnostics.initial()
 )
 
 class AuroraViewModel(application: Application) : AndroidViewModel(application) {
@@ -97,6 +100,11 @@ class AuroraViewModel(application: Application) : AndroidViewModel(application) 
 
     init {
         prefs.smoothPanelAnimations = true
+        viewModelScope.launch {
+            ProfileApplicationService.lastDiagnostics.collect { diagnostics ->
+                _uiState.update { it.copy(profileDiagnostics = diagnostics) }
+            }
+        }
         shizukuConnectionManager.registerListeners(
             onDisconnected = {
                 viewModelScope.launch {
@@ -179,7 +187,7 @@ class AuroraViewModel(application: Application) : AndroidViewModel(application) 
                 _uiState.update { it.copy(systemApplyProgress = step / 25f) }
             }
             val current = _uiState.value
-            val supportedHz = current.hardwareProfile?.supportedRefreshRatesHz ?: listOf(60f, 90f, 120f)
+            val supportedHz = current.hardwareProfile?.supportedRefreshRatesHz.orEmpty()
             val report = withContext(Dispatchers.IO) {
                 performanceModeController.applyMode(
                     mode = current.performanceMode,
@@ -190,7 +198,8 @@ class AuroraViewModel(application: Application) : AndroidViewModel(application) 
             _uiState.update {
                 it.copy(
                     systemApplyProgress = null,
-                    statusBannerMessage = report.summary
+                    statusBannerMessage = report.summary,
+                    profileDiagnostics = report.diagnostics
                 )
             }
         }
@@ -206,7 +215,7 @@ class AuroraViewModel(application: Application) : AndroidViewModel(application) 
 
     fun selectPerformanceMode(mode: PerformanceMode) {
         viewModelScope.launch(Dispatchers.IO) {
-            val supportedHz = _uiState.value.hardwareProfile?.supportedRefreshRatesHz ?: listOf(60f, 90f, 120f)
+            val supportedHz = _uiState.value.hardwareProfile?.supportedRefreshRatesHz.orEmpty()
             val report = performanceModeController.applyMode(
                 mode = mode,
                 touchProfile = _uiState.value.touchProfile,
@@ -214,9 +223,10 @@ class AuroraViewModel(application: Application) : AndroidViewModel(application) 
             )
             _uiState.update {
                 it.copy(
-                    performanceMode = mode,
-                    smoothAnimations = mode.enableDecorativeUiAnimations,
-                    statusBannerMessage = report.summary
+                    performanceMode = if (report.activated) mode else it.performanceMode,
+                    smoothAnimations = if (report.activated) mode.enableDecorativeUiAnimations else it.smoothAnimations,
+                    statusBannerMessage = report.summary,
+                    profileDiagnostics = report.diagnostics
                 )
             }
         }
@@ -230,28 +240,35 @@ class AuroraViewModel(application: Application) : AndroidViewModel(application) 
 
     fun selectTargetRefreshRate(hz: Float) {
         viewModelScope.launch(Dispatchers.IO) {
-            val supportedHz = _uiState.value.hardwareProfile?.supportedRefreshRatesHz ?: listOf(60f, 90f, 120f)
-            if (hz !in supportedHz || hz !in setOf(60f, 90f, 120f)) {
+            val supportedHz = _uiState.value.hardwareProfile?.supportedRefreshRatesHz.orEmpty()
+            val selectedHz = supportedHz.minByOrNull { kotlin.math.abs(it - hz) }
+                ?.takeIf { kotlin.math.abs(it - hz) < 2f }
+            if (selectedHz == null) {
                 _uiState.update {
                     it.copy(statusBannerMessage = "The selected ${hz.toInt()} Hz target is not supported by this display.")
                 }
                 return@launch
             }
-            prefs.targetRefreshRateHz = hz
             val shizuku = shizukuConnectionManager.refreshStatus()
             if (shizuku.canExecutePrivileged) {
                 val report = performanceModeController.applyMode(
                     mode = _uiState.value.performanceMode,
                     touchProfile = _uiState.value.touchProfile,
                     supportedRefreshRates = supportedHz,
-                    targetRefreshRate = hz
+                    targetRefreshRate = selectedHz
                 )
                 _uiState.update {
-                    it.copy(statusBannerMessage = report.summary)
+                    it.copy(
+                        statusBannerMessage = report.summary,
+                        profileDiagnostics = report.diagnostics
+                    )
                 }
+                if (report.activated) prefs.targetRefreshRateHz = selectedHz
             } else {
                 _uiState.update {
-                    it.copy(statusBannerMessage = "Saved ${hz.toInt()} Hz preference. Authorize Shizuku to lock display refresh rate.")
+                    it.copy(
+                        statusBannerMessage = "Authorize Shizuku to apply the selected display refresh rate."
+                    )
                 }
             }
         }
@@ -295,7 +312,7 @@ class AuroraViewModel(application: Application) : AndroidViewModel(application) 
                 }
                 return@launch
             }
-            val supportedHz = _uiState.value.hardwareProfile?.supportedRefreshRatesHz ?: listOf(60f, 90f, 120f)
+            val supportedHz = _uiState.value.hardwareProfile?.supportedRefreshRatesHz.orEmpty()
             val status = robloxEngine.startGamingSession(
                 mode = _uiState.value.performanceMode,
                 supportedRefreshRates = supportedHz,
@@ -370,10 +387,13 @@ class AuroraViewModel(application: Application) : AndroidViewModel(application) 
             selectPerformanceMode(_uiState.value.performanceMode)
         } else {
             viewModelScope.launch(Dispatchers.IO) {
-                val supportedHz = _uiState.value.hardwareProfile?.supportedRefreshRatesHz ?: listOf(60f)
+                val supportedHz = _uiState.value.hardwareProfile?.supportedRefreshRatesHz.orEmpty()
                 val report = performanceModeController.applyFramePacing(mult, supportedRefreshRates = supportedHz)
                 _uiState.update {
-                    it.copy(statusBannerMessage = report?.summary ?: "Frame pacing is turned off.")
+                    it.copy(
+                        statusBannerMessage = report?.summary ?: "Frame pacing is turned off.",
+                        profileDiagnostics = report?.diagnostics ?: it.profileDiagnostics
+                    )
                 }
             }
         }

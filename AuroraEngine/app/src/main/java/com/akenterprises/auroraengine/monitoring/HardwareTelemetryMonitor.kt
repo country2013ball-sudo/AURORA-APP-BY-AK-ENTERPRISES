@@ -147,10 +147,10 @@ class HardwareTelemetryMonitor(private val context: Context) {
             val wm = context.getSystemService(Context.WINDOW_SERVICE) as WindowManager
             val display = wm.defaultDisplay
             val current = display.refreshRate
-            val modes = display.supportedModes.map { it.refreshRate }.distinct().sorted()
-            current to (if (modes.isNotEmpty()) modes else listOf(60f, 90f, 120f))
+            val modes = display.supportedModes.map { it.refreshRate }.filter { it.isFinite() && it > 0f }.distinct().sorted()
+            current to modes
         } catch (_: Throwable) {
-            60f to listOf(60f, 90f, 120f)
+            0f to emptyList()
         }
     }
 

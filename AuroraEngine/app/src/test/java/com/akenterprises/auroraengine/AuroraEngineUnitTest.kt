@@ -4,10 +4,9 @@ import com.akenterprises.auroraengine.core.model.FrameGenMultiplier
 import com.akenterprises.auroraengine.core.model.PerformanceMode
 import com.akenterprises.auroraengine.core.model.ShizukuStatus
 import com.akenterprises.auroraengine.core.model.UpscalingMode
+import com.akenterprises.auroraengine.performance.parseLegacySettingsSnapshot
 import com.akenterprises.auroraengine.performance.highestSupportedRefreshRate
 import com.akenterprises.auroraengine.shizuku.parseGfxinfoFrameRate
-import com.akenterprises.auroraengine.shizuku.parseSettingsSnapshot
-import com.akenterprises.auroraengine.shizuku.parsePersistedSettingsSnapshot
 import org.junit.Assert.*
 import org.junit.Test
 
@@ -72,28 +71,18 @@ class AuroraEngineUnitTest {
     }
 
     @Test
-    fun restoreSnapshotAcceptsCompleteNumericAndUnsetSettingsOnly() {
-        val output = """
-            global	window_animation_scale	0.5
-            global	transition_animation_scale	null
-            global	animator_duration_scale	0.7
-            system	peak_refresh_rate	90.0
-            system	min_refresh_rate	60.0
-        """.trimIndent()
-
-        assertEquals(5, parseSettingsSnapshot(output)?.size)
-        assertNull(parseSettingsSnapshot(output.lines().dropLast(1).joinToString("\n")))
-        assertNull(parseSettingsSnapshot(output.replace("90.0", "90.0; reboot")))
-        assertEquals(
-            parseSettingsSnapshot(output),
-            parsePersistedSettingsSnapshot(
-                "global:window_animation_scale\t0.5\n" +
-                    "global:transition_animation_scale\tnull\n" +
-                    "global:animator_duration_scale\t0.7\n" +
-                    "system:peak_refresh_rate\t90.0\n" +
-                    "system:min_refresh_rate\t60.0"
-            )
+    fun legacyRestoreSnapshotParsesLiteralNullAsUnset() {
+        val snapshot = parseLegacySettingsSnapshot(
+            "global:window_animation_scale\t0.5\n" +
+                "global:transition_animation_scale\tnull\n" +
+                "system:peak_refresh_rate\t90.0"
         )
+        val records = requireNotNull(snapshot)
+        assertEquals(3, records.size)
+        assertEquals("0.5", records.first().originalValue)
+        assertFalse(records[1].wasSet)
+        assertNull(records[1].originalValue)
+        assertNull(parseLegacySettingsSnapshot("invalid snapshot"))
     }
 
     @Test
