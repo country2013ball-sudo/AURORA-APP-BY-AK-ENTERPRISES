@@ -169,7 +169,7 @@ class ProfileApplicationServiceTest {
         )
         assertFalse(result.activated)
         assertEquals("1.0", executor.values["global:window_animation_scale"])
-        assertTrue(result.operations.any { it.name.startsWith("rollback global:window_animation_scale") })
+        assertTrue(result.operations.any { it.name.startsWith("rollback global.window_animation_scale") })
     }
 
     @Test

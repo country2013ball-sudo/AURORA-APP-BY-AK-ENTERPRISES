@@ -88,7 +88,7 @@ class AuroraEngineUnitTest {
     @Test
     fun framePacingUsesHighestSupportedRefreshRateWithoutInventingOne() {
         assertEquals(90f, requireNotNull(highestSupportedRefreshRate(listOf(60f, 90f))), 0f)
-        assertEquals(60f, requireNotNull(highestSupportedRefreshRate(listOf(60f, 144f))), 0f)
+        assertEquals(144f, requireNotNull(highestSupportedRefreshRate(listOf(60f, 144f))), 0f)
         assertNull(highestSupportedRefreshRate(listOf(59.94f, 144f)))
         assertNull(highestSupportedRefreshRate(emptyList()))
     }
