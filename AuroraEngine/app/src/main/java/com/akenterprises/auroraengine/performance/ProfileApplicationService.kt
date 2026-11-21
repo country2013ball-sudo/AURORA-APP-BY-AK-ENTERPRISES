@@ -227,7 +227,7 @@ class ProfileApplicationService(
             result.diagnostics.copy(operations = result.operations.takeLast(20)),
             mode
         )
-        lastDiagnostics.value = mergedDiagnostics
+        mutableDiagnostics.value = mergedDiagnostics
         result.copy(diagnostics = mergedDiagnostics)
     }
 
@@ -489,7 +489,7 @@ class ProfileApplicationService(
             balancedProfile = profileCheck(mode, if (mode == PerformanceMode.BALANCED) resultLevel(optionalFailure) else DiagnosticLevel.FAIL, null),
             performanceProfile = profileCheck(mode, if (mode == PerformanceMode.PERFORMANCE) resultLevel(optionalFailure) else DiagnosticLevel.FAIL, null)
         )
-        ProfileApplicationResult(
+        return ProfileApplicationResult(
             mode = mode,
             activated = true,
             fullyApplied = !optionalFailure,

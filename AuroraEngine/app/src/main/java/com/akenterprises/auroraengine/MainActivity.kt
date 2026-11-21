@@ -781,8 +781,13 @@ private fun PerformancePanelContent(
         fontSize = 14.sp,
         fontWeight = FontWeight.SemiBold
     )
+    val currentRefreshRateLabel = state.hardwareProfile?.currentRefreshRateHz
+        ?.takeIf { it > 0f }
+        ?.toInt()
+        ?.let { "$it Hz" }
+        ?: "unavailable"
     Text(
-        text = "Dynamically detected panel modes (Current: ${state.hardwareProfile?.currentRefreshRateHz?.takeIf { it > 0f }?.toInt()?.let { \"$it Hz\" } ?: \"unavailable\"})",
+        text = "Dynamically detected panel modes (Current: $currentRefreshRateLabel)",
         color = Color(0xFF7D8796),
         fontSize = 11.sp
     )
